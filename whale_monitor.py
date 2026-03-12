@@ -85,35 +85,42 @@ def impact_label(usd: float) -> str:
 async def test_discord_webhook():
     print("\n🔍 TESTING DISCORD WEBHOOK...")
     embed = {
-        "title": "🛰️ XerisCoin Monitor — Online",
+        "author": {
+            "name": "XerisCoin Monitor System",
+            "icon_url": "https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png"
+        },
+        "title": "🛰️ Monitor Activated · System Online",
         "description": (
             "```\n"
-            "    ╔═══════════════════════════╗\n"
-            "    ║   MONITORING ACTIVATED   ║\n"
-            "    ╚═══════════════════════════╝\n"
+            "╔══════════════════════════════════╗\n"
+            "║  REAL-TIME MONITORING ACTIVE    ║\n"
+            "║  • Whale Tracking               ║\n"
+            "║  • Dev Activity Alerts          ║\n"
+            "║  • Price Movement Detection     ║\n"
+            "╚══════════════════════════════════╝\n"
             "```\n"
-            "Real-time whale tracking & price alerts are **LIVE**"
+            "> All systems operational · Monitoring blockchain activity"
         ),
-        "color": 0x00D9A3,
+        "color": 0x10B981,  # Emerald
         "fields": [
             {
-                "name": "🐋 Whale Alerts",
-                "value": f"Threshold: `${WHALE_MIN_USD:,}+`",
+                "name": "🐋 Whale Detection",
+                "value": f"```yaml\nThreshold: ${WHALE_MIN_USD:,} USD+\nStatus: Active\n```",
                 "inline": True
             },
             {
                 "name": "📈 Price Alerts",
-                "value": f"Trigger: `±{PRICE_ALERT_THRESHOLD}%`",
+                "value": f"```yaml\nTrigger: ±{PRICE_ALERT_THRESHOLD}%\nCooldown: {PRICE_ALERT_COOLDOWN}s\n```",
                 "inline": True
             },
             {
-                "name": "⏱️ Cooldown",
-                "value": f"`{PRICE_ALERT_COOLDOWN}s`",
+                "name": "⚡ System Info",
+                "value": "```yaml\nRPC: Helius Mainnet\nNetwork: Solana\nStatus: Connected\n```",
                 "inline": True
             }
         ],
         "footer": {
-            "text": "XerisCoin Monitor • Powered by Helius RPC"
+            "text": f"Powered by Helius RPC · Started at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
         },
         "timestamp": get_timestamp()
     }
@@ -249,74 +256,85 @@ async def check_price_alert():
 
 def build_price_alert_embed(pct_change: float, ref_price: float) -> dict:
     is_pump   = pct_change > 0
-    color     = 0x00D9A3 if is_pump else 0xFF4757
     sign      = "+" if is_pump else ""
     
-    # Movement intensity
+    # Premium color palette
+    color = 0x10B981 if is_pump else 0xEF4444  # Emerald / Rose
+    
+    # Movement intensity with visual indicators
     abs_pct = abs(pct_change)
     if abs_pct >= 15:
-        intensity = "🔥 EXTREME"
-        bar = "█████████████"
+        intensity = "🔥 EXTREME MOVE"
+        bars = "████████████"
     elif abs_pct >= 10:
-        intensity = "⚡ STRONG"
-        bar = "█████████░░░░"
+        intensity = "⚡ STRONG MOVE"
+        bars = "█████████░░░"
     elif abs_pct >= 7:
-        intensity = "📈 NOTABLE"
-        bar = "███████░░░░░░"
+        intensity = "📈 NOTABLE MOVE"
+        bars = "███████░░░░░"
     else:
-        intensity = "📶 MODERATE"
-        bar = "████░░░░░░░░░"
+        intensity = "📊 MODERATE MOVE"
+        bars = "█████░░░░░░░"
 
     mcap_change = current_market_cap - (current_market_cap / (1 + pct_change / 100))
     mcap_sign   = "+" if mcap_change >= 0 else ""
 
     direction_emoji = "🚀" if is_pump else "📉"
-    direction_text = "PUMPING" if is_pump else "DUMPING"
+    direction = "PUMP" if is_pump else "DUMP"
 
     embed = {
-        "title": f"{direction_emoji} PRICE ALERT: {direction_text}",
+        "author": {
+            "name": f"{intensity}",
+            "icon_url": "https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png"
+        },
+        "title": f"{direction_emoji} Price Alert: {direction} {sign}{pct_change:.2f}%",
         "description": (
-            f"```ansi\n"
-            f"\u001b[1;{'32' if is_pump else '31'}m{sign}{pct_change:.2f}%\u001b[0m price movement detected\n"
+            f"```diff\n"
+            f"{'+ ' if is_pump else '- '}{sign}{pct_change:.2f}% price movement detected\n"
             f"```\n"
-            f"Price has moved **{sign}{pct_change:.2f}%** from reference point"
+            f"> Price has {'surged' if is_pump else 'dropped'} **{sign}{pct_change:.2f}%** from last reference point"
         ),
         "color": color,
         "fields": [
             {
                 "name": "💹 Price Movement",
                 "value": (
-                    f"**From:** `${ref_price:.8f}`\n"
-                    f"**To:** `${current_price:.8f}`\n"
-                    f"**Change:** `{sign}{pct_change:.2f}%`"
+                    f"```yaml\n"
+                    f"Reference: ${ref_price:.8f}\n"
+                    f"Current:   ${current_price:.8f}\n"
+                    f"Change:    {sign}{pct_change:.2f}%\n"
+                    f"```"
                 ),
                 "inline": True
             },
             {
-                "name": "📊 Market Cap",
+                "name": "📊 Market Cap Impact",
                 "value": (
-                    f"**Current:** `{format_usd(current_market_cap)}`\n"
-                    f"**Change:** `{mcap_sign}{format_usd(abs(mcap_change))}`\n"
-                    f"**Impact:** {intensity}"
+                    f"```yaml\n"
+                    f"MCap:   {format_usd(current_market_cap)}\n"
+                    f"Change: {mcap_sign}{format_usd(abs(mcap_change))}\n"
+                    f"Delta:  {mcap_sign}{abs(mcap_change/current_market_cap*100):.2f}%\n"
+                    f"```"
                 ),
                 "inline": True
             },
             {
-                "name": "📶 Momentum",
-                "value": f"`{bar}` {abs_pct:.1f}%",
+                "name": "📈 Momentum Indicator",
+                "value": f"`{bars}` **{abs_pct:.1f}%**",
                 "inline": False
             },
             {
-                "name": "🔗 Check Charts",
+                "name": "🔗 Monitor Charts",
                 "value": (
-                    f"[DexScreener](https://dexscreener.com/solana/{MINT}) • "
-                    f"[Birdeye](https://birdeye.so/token/{MINT})"
+                    f"[DexScreener]({f'https://dexscreener.com/solana/{MINT}'}) · "
+                    f"[Birdeye]({f'https://birdeye.so/token/{MINT}'}) · "
+                    f"[Solscan]({f'https://solscan.io/token/{MINT}'})"
                 ),
                 "inline": False
             }
         ],
         "footer": {
-            "text": f"Price Monitor • Threshold: ±{PRICE_ALERT_THRESHOLD}% • Reference resets after alert"
+            "text": f"Price Monitor · Threshold ±{PRICE_ALERT_THRESHOLD}% · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
         },
         "timestamp": get_timestamp()
     }
@@ -429,65 +447,72 @@ def build_whale_embed(tx_type: str, amount: float, wallet: str, usd_value: float
     mcap_diff = new_mcap - current_market_cap
     diff_sign = "+" if mcap_diff >= 0 else ""
 
-    # Impact sizing
+    # Impact sizing with premium colors
     if usd_value >= 50_000:
         size_label = "MEGA WHALE"
-        emoji = "🔴"
+        tier_emoji = "💎"
     elif usd_value >= 10_000:
         size_label = "WHALE"
-        emoji = "🟠"
+        tier_emoji = "🌊"
     elif usd_value >= 5_000:
         size_label = "BIG FISH"
-        emoji = "🟡"
+        tier_emoji = "⭐"
     else:
         size_label = "FISH"
-        emoji = "🔵"
+        tier_emoji = "💫"
 
-    color = 0x00D9A3 if is_buy else 0xFF4757
-    action = "🟢 BUY" if is_buy else "🔴 SELL"
-
-    # Impact percentage of market cap
+    # Sophisticated color scheme
+    color = 0x10B981 if is_buy else 0xEF4444  # Emerald / Rose
+    action_emoji = "📈" if is_buy else "📉"
+    
+    # Impact percentage
     impact_pct = (usd_value / current_market_cap * 100) if current_market_cap > 0 else 0
     
+    # Create visual separator
+    separator = "━━━━━━━━━━━━━━━━━━━━━━━"
+    
     embed = {
-        "title": f"{emoji} {size_label} {action}",
-        "description": f"```ansi\n\u001b[1;37m{format_usd(usd_value)}\u001b[0m trade detected\n```",
+        "author": {
+            "name": f"{tier_emoji} {size_label} DETECTED",
+            "icon_url": "https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png"
+        },
+        "title": f"{action_emoji} {tx_type} · {format_usd(usd_value)}",
+        "description": (
+            f"```yaml\n"
+            f"Trade Size: {format_tokens(amount)} XERIS\n"
+            f"USD Value:  {format_usd(usd_value)}\n"
+            f"Impact:     {impact_pct:.2f}% of market cap\n"
+            f"```"
+        ),
         "color": color,
         "fields": [
             {
-                "name": "💰 Transaction",
+                "name": "💰 Market Metrics",
                 "value": (
-                    f"**Tokens:** `{format_tokens(amount)} XERIS`\n"
-                    f"**Value:** `{format_usd(usd_value)}`\n"
-                    f"**Impact:** `{impact_pct:.2f}%` of MCap"
+                    f"┌ Price: `${current_price:.8f}`\n"
+                    f"├ Market Cap: `{format_usd(current_market_cap)}`\n"
+                    f"└ New MCap: `{format_usd(new_mcap)}` ({diff_sign}{format_usd(abs(mcap_diff))})"
                 ),
-                "inline": True
-            },
-            {
-                "name": "📊 Market Data",
-                "value": (
-                    f"**Price:** `${current_price:.8f}`\n"
-                    f"**MCap:** `{format_usd(current_market_cap)}`\n"
-                    f"**New MCap:** `{format_usd(new_mcap)}`"
-                ),
-                "inline": True
-            },
-            {
-                "name": "👤 Wallet",
-                "value": f"`{wallet[:8]}...{wallet[-8:]}`",
                 "inline": False
             },
             {
-                "name": "🔗 Links",
+                "name": "👤 Wallet Address",
+                "value": f"```{wallet}```",
+                "inline": False
+            },
+            {
+                "name": "🔗 Quick Links",
                 "value": (
-                    f"[View Transaction](https://solscan.io/tx/{signature}) • "
-                    f"[Chart](https://dexscreener.com/solana/{MINT})"
+                    f"[Transaction]({f'https://solscan.io/tx/{signature}'}) · "
+                    f"[Wallet]({f'https://solscan.io/account/{wallet}'}) · "
+                    f"[Chart]({f'https://dexscreener.com/solana/{MINT}'})"
                 ),
                 "inline": False
             }
         ],
         "footer": {
-            "text": f"XerisCoin Monitor • MCap Change: {diff_sign}{format_usd(abs(mcap_diff))}"
+            "text": f"XerisCoin Monitor · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}",
+            "icon_url": "https://cdn.discordapp.com/emojis/1234567890.png"
         },
         "timestamp": get_timestamp()
     }
@@ -500,50 +525,58 @@ def build_dev_sell_embed(amount: float, wallet: str, usd_value: float, signature
     impact_pct = (usd_value / current_market_cap * 100) if current_market_cap > 0 else 0
 
     embed = {
-        "title": "🚨 DEVELOPER WALLET SELL ALERT",
+        "author": {
+            "name": "⚠️ DEVELOPER ACTIVITY ALERT",
+            "icon_url": "https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png"
+        },
+        "title": "🚨 Dev Wallet Sell Detected",
         "description": (
-            "```diff\n"
-            "- ⚠️  Dev wallet is selling tokens\n"
-            "```\n"
-            f"**Monitor price action closely** — `{format_usd(usd_value)}` sell detected"
+            f"```diff\n"
+            f"- Developer has executed a SELL transaction\n"
+            f"```\n"
+            f"**⚠️ Monitor price action closely**\n"
+            f"> Sell Amount: **{format_usd(usd_value)}** ({impact_pct:.2f}% of MCap)"
         ),
-        "color": 0xE74C3C,
+        "color": 0xDC2626,  # Deep red
         "fields": [
             {
-                "name": "💸 Sell Details",
+                "name": "💸 Transaction Details",
                 "value": (
-                    f"**Tokens:** `{format_tokens(amount)} XERIS`\n"
-                    f"**Value:** `{format_usd(usd_value)}`\n"
-                    f"**Impact:** `{impact_pct:.2f}%` of MCap"
+                    f"```yaml\n"
+                    f"Tokens:     {format_tokens(amount)} XERIS\n"
+                    f"USD Value:  {format_usd(usd_value)}\n"
+                    f"Price:      ${current_price:.8f}\n"
+                    f"Impact:     {impact_pct:.2f}%\n"
+                    f"```"
                 ),
-                "inline": True
-            },
-            {
-                "name": "📊 Market Impact",
-                "value": (
-                    f"**Price:** `${current_price:.8f}`\n"
-                    f"**MCap Before:** `{format_usd(current_market_cap)}`\n"
-                    f"**MCap After:** `{format_usd(new_mcap)}`"
-                ),
-                "inline": True
-            },
-            {
-                "name": "👤 Dev Wallet",
-                "value": f"`{wallet[:8]}...{wallet[-8:]}`",
                 "inline": False
             },
             {
-                "name": "🔗 Verify Transaction",
+                "name": "📊 Market Cap Impact",
                 "value": (
-                    f"[View TX](https://solscan.io/tx/{signature}) • "
-                    f"[Check Wallet](https://solscan.io/account/{wallet}) • "
-                    f"[Chart](https://dexscreener.com/solana/{MINT})"
+                    f"┌ Before: `{format_usd(current_market_cap)}`\n"
+                    f"├ After:  `{format_usd(new_mcap)}`\n"
+                    f"└ Change: `{format_usd(mcap_diff)}` ({abs(impact_pct):.2f}%)"
+                ),
+                "inline": False
+            },
+            {
+                "name": "👤 Developer Wallet",
+                "value": f"```{wallet}```",
+                "inline": False
+            },
+            {
+                "name": "🔍 Verification Links",
+                "value": (
+                    f"[View Transaction]({f'https://solscan.io/tx/{signature}'}) · "
+                    f"[Wallet History]({f'https://solscan.io/account/{wallet}'}) · "
+                    f"[Live Chart]({f'https://dexscreener.com/solana/{MINT}'})"
                 ),
                 "inline": False
             }
         ],
         "footer": {
-            "text": f"⚠️ Dev Activity • MCap Change: {format_usd(mcap_diff)}"
+            "text": f"Dev Activity Monitor · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}",
         },
         "timestamp": get_timestamp()
     }
