@@ -3,18 +3,25 @@ import json
 import httpx
 import websockets
 import time
+import os
 from datetime import datetime, timezone
 
 # ------------------------------------------------------------
-# CONFIG
+# CONFIG - Set these as environment variables in Railway
 # ------------------------------------------------------------
 
-MINT = "9ezFthWrDUpSSeMdpLW6SDD9TJigHdc4AuQ5QN5bpump"
-HELIUS_API_KEY = "ce0e621e-16d6-41fc-b936-523b06754d3d"
-DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1471862271088132241/gG-cBIHC3_UoJhe1UUWjh-6jZrsJC22aHzCUVnb8Q23UAWx4cM73dU_l-aQ1CaszDyr1"
+MINT = os.getenv("MINT", "9ezFthWrDUpSSeMdpLW6SDD9TJigHdc4AuQ5QN5bpump")
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")  # REQUIRED - set in Railway
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")  # REQUIRED - set in Railway
 
-DEV_WALLET = "6XjutcUVEidzb3o1yXLYGC2ZSnjde2YvAUF9CiPVqxwm"
-WHALE_MIN_USD = 1000
+DEV_WALLET = os.getenv("DEV_WALLET", "6XjutcUVEidzb3o1yXLYGC2ZSnjde2YvAUF9CiPVqxwm")
+WHALE_MIN_USD = int(os.getenv("WHALE_MIN_USD", "1000"))
+
+# Validate required environment variables
+if not HELIUS_API_KEY:
+    raise ValueError("❌ HELIUS_API_KEY environment variable is required! Set it in Railway.")
+if not DISCORD_WEBHOOK:
+    raise ValueError("❌ DISCORD_WEBHOOK environment variable is required! Set it in Railway.")
 
 WS_URL  = f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
