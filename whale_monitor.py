@@ -141,12 +141,15 @@ async def test_discord_webhook():
 # WEBHOOK SENDER
 # ------------------------------------------------------------
 
-async def send_webhook(embeds: list):
+async def send_webhook(embeds: list, ping_everyone: bool = False):
     """Send one or more embeds to Discord."""
     print(f"\n📤 Sending Discord alert ({len(embeds)} embed(s))...")
+    payload = {"embeds": embeds}
+    if ping_everyone:
+        payload["content"] = "@everyone"
     async with httpx.AsyncClient() as client:
         try:
-            r = await client.post(DISCORD_WEBHOOK, json={"embeds": embeds})
+            r = await client.post(DISCORD_WEBHOOK, json=payload)
             if r.status_code == 204:
                 print("   ✅ Alert sent!")
                 return True
@@ -674,7 +677,7 @@ async def monitor():
                         elif usd_value >= WHALE_MIN_USD:
                             print(f"\n🐋 WHALE {tx_type} — {format_usd(usd_value)}")
                             embed = build_whale_embed(tx_type, amount, wallet, usd_value, signature)
-                            await send_webhook([embed])
+                            await send_webhook([embed],ping_everyone=True)
 
                         else:
                             print(f"\nℹ️ Below threshold ({format_usd(usd_value)} < {format_usd(WHALE_MIN_USD)})")
