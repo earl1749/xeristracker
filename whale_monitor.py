@@ -15,7 +15,7 @@ HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")  # REQUIRED - set in Railway
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")  # REQUIRED - set in Railway
 
 DEV_WALLET = os.getenv("DEV_WALLET", "6XjutcUVEidzb3o1yXLYGC2ZSnjde2YvAUF9CiPVqxwm")
-WHALE_MIN_USD = int(os.getenv("WHALE_MIN_USD", "1000"))
+WHALE_MIN_USD = int(os.getenv("WHALE_MIN_USD", "1720"))
 
 # Validate required environment variables
 if not HELIUS_API_KEY:
