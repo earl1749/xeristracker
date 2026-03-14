@@ -6,18 +6,18 @@ import time
 import os
 from datetime import datetime, timezone
 
-# ------------------------------------------------------------
-# CONFIG - Set these as environment variables in Railway
-# ------------------------------------------------------------
+                                                              
+                                                        
+                                                              
 
 MINT = os.getenv("MINT", "9ezFthWrDUpSSeMdpLW6SDD9TJigHdc4AuQ5QN5bpump")
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")  # REQUIRED - set in Railway
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")  # REQUIRED - set in Railway
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")                             
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")                             
 
 DEV_WALLET = os.getenv("DEV_WALLET", "6XjutcUVEidzb3o1yXLYGC2ZSnjde2YvAUF9CiPVqxwm")
 WHALE_MIN_USD = int(os.getenv("WHALE_MIN_USD", "1720"))
 
-# Validate required environment variables
+                                         
 if not HELIUS_API_KEY:
     raise ValueError("❌ HELIUS_API_KEY environment variable is required! Set it in Railway.")
 if not DISCORD_WEBHOOK:
@@ -26,30 +26,29 @@ if not DISCORD_WEBHOOK:
 WS_URL  = f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
-# Price & market cap caches
+                           
 current_price      = 0.0
 current_market_cap = 0.0
 total_supply       = 0.0
 last_price_update  = 0
 PRICE_UPDATE_INTERVAL = 30
 
-# Price alert config
-PRICE_ALERT_THRESHOLD = 5.0        # % move that triggers an alert
-PRICE_ALERT_COOLDOWN  = 300        # seconds between same-direction alerts (5 min)
-price_reference       = 0.0        # baseline price we measure % from
-last_alert_up_time    = 0.0        # last time we sent a pump alert
-last_alert_down_time  = 0.0        # last time we sent a dump alert
-last_alert_direction  = None       # "up" | "down" | None
+                    
+PRICE_ALERT_THRESHOLD = 5.0                                       
+PRICE_ALERT_COOLDOWN  = 300                                                       
+price_reference       = 0.0                                          
+last_alert_up_time    = 0.0                                        
+last_alert_down_time  = 0.0                                        
+last_alert_direction  = None                             
 
-# ------------------------------------------------------------
-# HELPERS
-# ------------------------------------------------------------
+                                                              
+         
+                                                              
 
 def get_timestamp():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 def format_usd(value: float) -> str:
-    """Smart compact formatting: $1.23K / $4.56M / $789"""
     if value >= 1_000_000:
         return f"${value/1_000_000:.2f}M"
     elif value >= 1_000:
@@ -68,7 +67,6 @@ def wallet_short(addr: str) -> str:
     return f"`{addr[:6]}...{addr[-6:]}`"
 
 def make_bar(pct: float, width: int = 12) -> str:
-    """Render a text progress bar using block characters."""
     filled = round(pct / 100 * width)
     return "█" * filled + "░" * (width - filled)
 
@@ -78,9 +76,9 @@ def impact_label(usd: float) -> str:
     if usd >= 5_000:   return "🟡 BIG FISH"
     return              "🔵 FISH"
 
-# ------------------------------------------------------------
-# DISCORD TEST
-# ------------------------------------------------------------
+                                                              
+              
+                                                              
 
 async def test_discord_webhook():
     print("\n🔍 TESTING DISCORD WEBHOOK...")
@@ -101,7 +99,7 @@ async def test_discord_webhook():
             "```\n"
             "> All systems operational · Monitoring blockchain activity"
         ),
-        "color": 0x10B981,  # Emerald
+        "color": 0x10B981,
         "fields": [
             {
                 "name": "🐋 Whale Detection",
@@ -137,12 +135,11 @@ async def test_discord_webhook():
             print(f"❌ Exception: {e}")
             return False
 
-# ------------------------------------------------------------
-# WEBHOOK SENDER
-# ------------------------------------------------------------
+                                                              
+                
+                                                              
 
 async def send_webhook(embeds: list, ping_everyone: bool = False):
-    """Send one or more embeds to Discord."""
     print(f"\n📤 Sending Discord alert ({len(embeds)} embed(s))...")
     payload = {"embeds": embeds}
     if ping_everyone:
@@ -160,9 +157,9 @@ async def send_webhook(embeds: list, ping_everyone: bool = False):
             print(f"   ❌ Exception: {e}")
             return False
 
-# ------------------------------------------------------------
-# PRICE + MARKET CAP
-# ------------------------------------------------------------
+                                                              
+                    
+                                                              
 
 async def update_price():
     global current_price, current_market_cap, total_supply, last_price_update, price_reference
@@ -176,7 +173,6 @@ async def update_price():
                 pair = pairs[0]
                 new_price = float(pair.get("priceUsd") or 0)
 
-                # Market cap: prefer fdv (fully diluted) from DexScreener
                 fdv  = pair.get("fdv")
                 mcap = pair.get("marketCap")
                 if fdv:
@@ -187,16 +183,13 @@ async def update_price():
                     liq = float((pair.get("liquidity") or {}).get("usd") or 0)
                     current_market_cap = liq * 2
 
-                # Set reference price on first fetch
                 if price_reference == 0.0 and new_price > 0:
                     price_reference = new_price
 
-                old_price     = current_price
                 current_price = new_price
                 last_price_update = time.time()
                 print(f"💰 Price: ${current_price:.8f} | MCap: {format_usd(current_market_cap)}")
 
-                # Check price alert (only after we have a reference)
                 if price_reference > 0 and current_price > 0:
                     await check_price_alert()
             else:
@@ -205,23 +198,16 @@ async def update_price():
         print(f"❌ Price fetch error: {e}")
 
 def estimate_new_mcap(tx_type: str, usd_value: float) -> float:
-    """
-    Estimate new market cap after a buy/sell.
-    Buys push price up → MCap rises by ~usd_value (very rough).
-    Sells push price down → MCap drops by ~usd_value.
-    This is a simplified heuristic for on-screen context.
-    """
     if tx_type == "BUY":
         return current_market_cap + usd_value
     else:
         return max(0, current_market_cap - usd_value)
 
-# ------------------------------------------------------------
-# PRICE ALERT ENGINE
-# ------------------------------------------------------------
+                                                              
+                    
+                                                              
 
 async def check_price_alert():
-    """Fire a Discord alert when price moves ±5% from the reference."""
     global price_reference, last_alert_up_time, last_alert_down_time, last_alert_direction
 
     if price_reference <= 0 or current_price <= 0:
@@ -232,39 +218,32 @@ async def check_price_alert():
     abs_change = abs(pct_change)
 
     if abs_change < PRICE_ALERT_THRESHOLD:
-        return  # not enough movement yet
+        return
 
-    direction = "up" if pct_change > 0 else "down"
-
-    # Cooldown check per direction
+    direction  = "up" if pct_change > 0 else "down"
     last_alert = last_alert_up_time if direction == "up" else last_alert_down_time
     if now - last_alert < PRICE_ALERT_COOLDOWN:
-        return  # already alerted recently for this direction
+        return
 
     print(f"\n{'🚀' if direction == 'up' else '🔻'} PRICE ALERT: {pct_change:+.2f}% from reference!")
 
     embed = build_price_alert_embed(pct_change, price_reference)
     await send_webhook([embed])
 
-    # Update state: reset reference to current price, update cooldown
     if direction == "up":
         last_alert_up_time = now
     else:
         last_alert_down_time = now
 
     last_alert_direction = direction
-    price_reference = current_price  # re-anchor reference so next alert is relative to NOW
+    price_reference = current_price
     print(f"   📌 Reference reset to ${current_price:.8f}")
-
 
 def build_price_alert_embed(pct_change: float, ref_price: float) -> dict:
     is_pump   = pct_change > 0
     sign      = "+" if is_pump else ""
-    
-    # Premium color palette
-    color = 0x10B981 if is_pump else 0xEF4444  # Emerald / Rose
-    
-    # Movement intensity with visual indicators
+    color     = 0x10B981 if is_pump else 0xEF4444
+
     abs_pct = abs(pct_change)
     if abs_pct >= 15:
         intensity = "🔥 EXTREME MOVE"
@@ -285,7 +264,7 @@ def build_price_alert_embed(pct_change: float, ref_price: float) -> dict:
     direction_emoji = "🚀" if is_pump else "📉"
     direction = "PUMP" if is_pump else "DUMP"
 
-    embed = {
+    return {
         "author": {
             "name": f"{intensity}",
             "icon_url": "https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png"
@@ -329,9 +308,9 @@ def build_price_alert_embed(pct_change: float, ref_price: float) -> dict:
             {
                 "name": "🔗 Monitor Charts",
                 "value": (
-                    f"[DexScreener]({f'https://dexscreener.com/solana/{MINT}'}) · "
-                    f"[Birdeye]({f'https://birdeye.so/token/{MINT}'}) · "
-                    f"[Solscan]({f'https://solscan.io/token/{MINT}'})"
+                    f"[DexScreener](https://dexscreener.com/solana/{MINT}) · "
+                    f"[Birdeye](https://birdeye.so/token/{MINT}) · "
+                    f"[Solscan](https://solscan.io/token/{MINT})"
                 ),
                 "inline": False
             }
@@ -341,11 +320,10 @@ def build_price_alert_embed(pct_change: float, ref_price: float) -> dict:
         },
         "timestamp": get_timestamp()
     }
-    return embed
 
-# ------------------------------------------------------------
-# TRANSACTION FETCHER
-# ------------------------------------------------------------
+                                                              
+                     
+                                                              
 
 async def fetch_tx(signature, retries=3):
     payload = {
@@ -388,11 +366,168 @@ async def fetch_tx(signature, retries=3):
     print(f"   ❌ All {retries} attempts failed")
     return None
 
-# ------------------------------------------------------------
-# TRANSACTION PARSER
-# ------------------------------------------------------------
+                                                              
+                           
+                                                              
+
+                                        
+                                                                        
+DEX_PROGRAMS = {
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",                  
+    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",                         
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",                   
+    "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",           
+    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",               
+    "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB",               
+    "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qZgUGpT",              
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",             
+}
+
+                                                                           
+                                                              
+                                                                     
+SOL_SWAP_THRESHOLD = 50_000            
+
+def is_transfer_not_swap(tx_data: dict, signer: str, signer_token_delta: int) -> bool:
+    """
+    Return True when the transaction is a wallet-to-wallet SPL token transfer
+    rather than a real DEX swap.  Uses two independent signals:
+
+    1. SOL balance delta  – a swap always moves meaningful SOL (buy pays SOL,
+       sell receives SOL).  A transfer only burns the tiny tx fee.
+
+    2. Structural owner check – if two distinct non-DEX wallets both show up
+       in the token-balance diff (one loses, one gains), with no DEX program
+       involved, it is a transfer.
+    """
+    meta         = tx_data.get("meta", {})
+    tx_msg       = tx_data.get("transaction", {}).get("message", {})
+    account_keys = tx_msg.get("accountKeys", [])
+
+                                                                               
+    pre_sol  = meta.get("preBalances",  [])
+    post_sol = meta.get("postBalances", [])
+
+    signer_index = None
+    for i, key in enumerate(account_keys):
+        pubkey = key.get("pubkey") if isinstance(key, dict) else key
+        if pubkey == signer:
+            signer_index = i
+            break
+
+    if (signer_index is not None
+            and signer_index < len(pre_sol)
+            and signer_index < len(post_sol)):
+        sol_delta = abs(post_sol[signer_index] - pre_sol[signer_index])
+        if sol_delta <= SOL_SWAP_THRESHOLD:
+                                                                     
+            print(f"   🔎 Transfer signal (SOL delta {sol_delta} lamps ≤ threshold)")
+            return True
+
+                                                                               
+    pre_balances  = meta.get("preTokenBalances",  []) or []
+    post_balances = meta.get("postTokenBalances", []) or []
+
+    pre_owners  = {b["owner"] for b in pre_balances  if b.get("mint") == MINT and "owner" in b}
+    post_owners = {b["owner"] for b in post_balances if b.get("mint") == MINT and "owner" in b}
+    all_owners  = pre_owners | post_owners
+
+                                                                 
+    if all_owners & DEX_PROGRAMS:
+        return False
+
+                                 
+    pre_map  = {b["owner"]: int((b.get("uiTokenAmount") or {}).get("amount") or 0)
+                for b in pre_balances  if b.get("mint") == MINT}
+    post_map = {b["owner"]: int((b.get("uiTokenAmount") or {}).get("amount") or 0)
+                for b in post_balances if b.get("mint") == MINT}
+
+    gainers = set()
+    losers  = set()
+    for owner in (all_owners - DEX_PROGRAMS):
+        delta = post_map.get(owner, 0) - pre_map.get(owner, 0)
+        if delta > 0:
+            gainers.add(owner)
+        elif delta < 0:
+            losers.add(owner)
+
+    if gainers and losers:
+                                                                                  
+        print(f"   🔎 Transfer signal (losers={len(losers)}, gainers={len(gainers)}, no DEX)")
+        return True
+
+    return False
+
+def build_transfer_embed(amount: float, from_wallet: str, to_wallet: str,
+                          usd_value: float, signature: str) -> dict:
+    """
+    Discord embed for a large wallet-to-wallet token transfer.
+    Displayed instead of (or alongside) the whale buy/sell embed.
+    """
+    impact_pct = (usd_value / current_market_cap * 100) if current_market_cap > 0 else 0
+    return {
+        "author": {
+            "name": "🔄 LARGE TOKEN TRANSFER",
+            "icon_url": "https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png"
+        },
+        "title": f"🔄 Wallet-to-Wallet Transfer · {format_usd(usd_value)}",
+        "description": (
+            f"```yaml\n"
+            f"Tokens:  {format_tokens(amount)} XERIS\n"
+            f"Value:   {format_usd(usd_value)}\n"
+            f"Impact:  {impact_pct:.2f}% of market cap\n"
+            f"```\n"
+            f"> This is a **transfer between wallets**, not a buy or sell.\n"
+            f"> No price impact expected."
+        ),
+        "color": 0x6366F1,                                             
+        "fields": [
+            {
+                "name": "📤 From",
+                "value": f"```{from_wallet}```",
+                "inline": False
+            },
+            {
+                "name": "📥 To",
+                "value": f"```{to_wallet}```",
+                "inline": False
+            },
+            {
+                "name": "💰 Market Context",
+                "value": (
+                    f"┌ Price:  `${current_price:.8f}`\n"
+                    f"└ MCap:   `{format_usd(current_market_cap)}`"
+                ),
+                "inline": False
+            },
+            {
+                "name": "🔗 Links",
+                "value": (
+                    f"[Transaction](https://solscan.io/tx/{signature}) · "
+                    f"[Sender](https://solscan.io/account/{from_wallet}) · "
+                    f"[Receiver](https://solscan.io/account/{to_wallet})"
+                ),
+                "inline": False
+            }
+        ],
+        "footer": {
+            "text": f"Transfer Monitor · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
+        },
+        "timestamp": get_timestamp()
+    }
+
+                                                              
+                               
+                                                              
 
 def parse_tx(tx_data, signature):
+    """
+    Returns one of:
+      ("BUY",      amount, wallet)           – real swap buy
+      ("SELL",     amount, wallet)           – real swap sell
+      ("TRANSFER", amount, wallet, to_wallet) – wallet-to-wallet SPL transfer
+      None                                   – irrelevant / failed
+    """
     if not tx_data:
         return None
 
@@ -400,12 +535,13 @@ def parse_tx(tx_data, signature):
     if not meta or meta.get("err"):
         return None
 
-    tx      = tx_data.get("transaction", {})
-    message = tx.get("message", {})
+    tx           = tx_data.get("transaction", {})
+    message      = tx.get("message", {})
     account_keys = message.get("accountKeys", [])
 
     if account_keys:
-        signer = account_keys[0].get("pubkey", "unknown") if isinstance(account_keys[0], dict) else account_keys[0]
+        signer = (account_keys[0].get("pubkey", "unknown")
+                  if isinstance(account_keys[0], dict) else account_keys[0])
     else:
         signer = "unknown"
 
@@ -419,16 +555,21 @@ def parse_tx(tx_data, signature):
         ui = entry.get("uiTokenAmount") or {}
         return int(ui.get("amount") or "0"), int(ui.get("decimals") or 6)
 
+                                                                                
     signer_delta = 0
     for p in post:
         if p.get("owner") == signer:
             amount_post, decimals = get_amount(p)
-            matching_pre = next((x for x in pre if x.get("accountIndex") == p.get("accountIndex")), None)
+            matching_pre = next(
+                (x for x in pre if x.get("accountIndex") == p.get("accountIndex")), None
+            )
             amount_pre = get_amount(matching_pre)[0] if matching_pre else 0
             signer_delta += amount_post - amount_pre
 
     for p in pre:
-        if p.get("owner") == signer and not any(x.get("accountIndex") == p.get("accountIndex") for x in post):
+        if p.get("owner") == signer and not any(
+            x.get("accountIndex") == p.get("accountIndex") for x in post
+        ):
             amount_pre, decimals = get_amount(p)
             signer_delta -= amount_pre
 
@@ -437,44 +578,57 @@ def parse_tx(tx_data, signature):
 
     decimals = 6
     amount   = abs(signer_delta) / (10 ** decimals)
-    tx_type  = "BUY" if signer_delta > 0 else "SELL"
+
+                                                                                
+    if is_transfer_not_swap(tx_data, signer, signer_delta):
+                                                                              
+        pre_map  = {b["owner"]: int((b.get("uiTokenAmount") or {}).get("amount") or 0)
+                    for b in pre  if "owner" in b}
+        post_map = {b["owner"]: int((b.get("uiTokenAmount") or {}).get("amount") or 0)
+                    for b in post if "owner" in b}
+
+        receiver = "unknown"
+        for owner in set(post_map) | set(pre_map):
+            if owner == signer or owner in DEX_PROGRAMS:
+                continue
+            delta = post_map.get(owner, 0) - pre_map.get(owner, 0)
+            if delta > 0:
+                receiver = owner
+                break
+
+        print(f"   🔄 TRANSFER detected: {format_tokens(amount)} XERIS  "
+              f"{signer[:8]}… → {receiver[:8]}…")
+        return "TRANSFER", amount, signer, receiver
+
+                                                                                
+    tx_type = "BUY" if signer_delta > 0 else "SELL"
     return tx_type, amount, signer
 
-# ------------------------------------------------------------
-# DISCORD EMBEDS — BEAUTIFUL LAYOUTS
-# ------------------------------------------------------------
+                                                              
+                                    
+                                                              
 
-def build_whale_embed(tx_type: str, amount: float, wallet: str, usd_value: float, signature: str) -> dict:
+def build_whale_embed(tx_type: str, amount: float, wallet: str,
+                      usd_value: float, signature: str) -> dict:
     is_buy    = tx_type == "BUY"
     new_mcap  = estimate_new_mcap(tx_type, usd_value)
     mcap_diff = new_mcap - current_market_cap
     diff_sign = "+" if mcap_diff >= 0 else ""
 
-    # Impact sizing with premium colors
     if usd_value >= 50_000:
-        size_label = "MEGA WHALE"
-        tier_emoji = "💎"
+        size_label, tier_emoji = "MEGA WHALE", "💎"
     elif usd_value >= 10_000:
-        size_label = "WHALE"
-        tier_emoji = "🌊"
+        size_label, tier_emoji = "WHALE", "🌊"
     elif usd_value >= 5_000:
-        size_label = "BIG FISH"
-        tier_emoji = "⭐"
+        size_label, tier_emoji = "BIG FISH", "⭐"
     else:
-        size_label = "FISH"
-        tier_emoji = "💫"
+        size_label, tier_emoji = "FISH", "💫"
 
-    # Sophisticated color scheme
-    color = 0x10B981 if is_buy else 0xEF4444  # Emerald / Rose
+    color        = 0x10B981 if is_buy else 0xEF4444
     action_emoji = "📈" if is_buy else "📉"
-    
-    # Impact percentage
-    impact_pct = (usd_value / current_market_cap * 100) if current_market_cap > 0 else 0
-    
-    # Create visual separator
-    separator = "━━━━━━━━━━━━━━━━━━━━━━━"
-    
-    embed = {
+    impact_pct   = (usd_value / current_market_cap * 100) if current_market_cap > 0 else 0
+
+    return {
         "author": {
             "name": f"{tier_emoji} {size_label} DETECTED",
             "icon_url": "https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png"
@@ -506,28 +660,26 @@ def build_whale_embed(tx_type: str, amount: float, wallet: str, usd_value: float
             {
                 "name": "🔗 Quick Links",
                 "value": (
-                    f"[Transaction]({f'https://solscan.io/tx/{signature}'}) · "
-                    f"[Wallet]({f'https://solscan.io/account/{wallet}'}) · "
-                    f"[Chart]({f'https://dexscreener.com/solana/{MINT}'})"
+                    f"[Transaction](https://solscan.io/tx/{signature}) · "
+                    f"[Wallet](https://solscan.io/account/{wallet}) · "
+                    f"[Chart](https://dexscreener.com/solana/{MINT})"
                 ),
                 "inline": False
             }
         ],
         "footer": {
-            "text": f"XerisCoin Monitor · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}",
-            "icon_url": "https://cdn.discordapp.com/emojis/1234567890.png"
+            "text": f"XerisCoin Monitor · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
         },
         "timestamp": get_timestamp()
     }
-    return embed
 
-
-def build_dev_sell_embed(amount: float, wallet: str, usd_value: float, signature: str) -> dict:
-    new_mcap  = estimate_new_mcap("SELL", usd_value)
-    mcap_diff = new_mcap - current_market_cap
+def build_dev_sell_embed(amount: float, wallet: str, usd_value: float,
+                          signature: str) -> dict:
+    new_mcap   = estimate_new_mcap("SELL", usd_value)
+    mcap_diff  = new_mcap - current_market_cap
     impact_pct = (usd_value / current_market_cap * 100) if current_market_cap > 0 else 0
 
-    embed = {
+    return {
         "author": {
             "name": "⚠️ DEVELOPER ACTIVITY ALERT",
             "icon_url": "https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png"
@@ -540,7 +692,7 @@ def build_dev_sell_embed(amount: float, wallet: str, usd_value: float, signature
             f"**⚠️ Monitor price action closely**\n"
             f"> Sell Amount: **{format_usd(usd_value)}** ({impact_pct:.2f}% of MCap)"
         ),
-        "color": 0xDC2626,  # Deep red
+        "color": 0xDC2626,
         "fields": [
             {
                 "name": "💸 Transaction Details",
@@ -571,23 +723,22 @@ def build_dev_sell_embed(amount: float, wallet: str, usd_value: float, signature
             {
                 "name": "🔍 Verification Links",
                 "value": (
-                    f"[View Transaction]({f'https://solscan.io/tx/{signature}'}) · "
-                    f"[Wallet History]({f'https://solscan.io/account/{wallet}'}) · "
-                    f"[Live Chart]({f'https://dexscreener.com/solana/{MINT}'})"
+                    f"[View Transaction](https://solscan.io/tx/{signature}) · "
+                    f"[Wallet History](https://solscan.io/account/{wallet}) · "
+                    f"[Live Chart](https://dexscreener.com/solana/{MINT})"
                 ),
                 "inline": False
             }
         ],
         "footer": {
-            "text": f"Dev Activity Monitor · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}",
+            "text": f"Dev Activity Monitor · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
         },
         "timestamp": get_timestamp()
     }
-    return embed
 
-# ------------------------------------------------------------
-# MONITOR LOOP
-# ------------------------------------------------------------
+                                                              
+                                                   
+                                                              
 
 async def monitor():
     global current_price
@@ -611,8 +762,8 @@ async def monitor():
 
     await update_price()
 
-    retry_count  = 0
-    tx_count     = 0
+    retry_count    = 0
+    tx_count       = 0
     failed_fetches = 0
 
     while True:
@@ -662,25 +813,46 @@ async def monitor():
                             print("❌ Not relevant — skipping")
                             continue
 
-                        tx_type, amount, wallet = parsed
-                        usd_value = amount * current_price
+                                                                                
+                        if parsed[0] == "TRANSFER":
+                            _, amount, from_wallet, to_wallet = parsed
+                            usd_value = amount * current_price
 
-                        print(f"\n📊 {tx_type} | {format_tokens(amount)} XERIS | {format_usd(usd_value)} | {wallet[:16]}...")
+                            print(f"\n🔄 TRANSFER | {format_tokens(amount)} XERIS | "
+                                  f"{format_usd(usd_value)} | "
+                                  f"{from_wallet[:10]}… → {to_wallet[:10]}…")
 
-                        # 🚨 DEV SELL
-                        if wallet == DEV_WALLET and tx_type == "SELL":
-                            print("\n🚨🚨🚨 DEV SELL DETECTED!")
-                            embed = build_dev_sell_embed(amount, wallet, usd_value, signature)
-                            await send_webhook([embed])
-
-                        # 🐋 WHALE
-                        elif usd_value >= WHALE_MIN_USD:
-                            print(f"\n🐋 WHALE {tx_type} — {format_usd(usd_value)}")
-                            embed = build_whale_embed(tx_type, amount, wallet, usd_value, signature)
-                            await send_webhook([embed],ping_everyone=True)
+                                                                                      
+                            if usd_value >= WHALE_MIN_USD:
+                                embed = build_transfer_embed(
+                                    amount, from_wallet, to_wallet, usd_value, signature
+                                )
+                                await send_webhook([embed])
+                            else:
+                                print(f"   ℹ️ Transfer below threshold — not alerting")
 
                         else:
-                            print(f"\nℹ️ Below threshold ({format_usd(usd_value)} < {format_usd(WHALE_MIN_USD)})")
+                            tx_type, amount, wallet = parsed
+                            usd_value = amount * current_price
+
+                            print(f"\n📊 {tx_type} | {format_tokens(amount)} XERIS | "
+                                  f"{format_usd(usd_value)} | {wallet[:16]}...")
+
+                                        
+                            if wallet == DEV_WALLET and tx_type == "SELL":
+                                print("\n🚨🚨🚨 DEV SELL DETECTED!")
+                                embed = build_dev_sell_embed(amount, wallet, usd_value, signature)
+                                await send_webhook([embed])
+
+                                     
+                            elif usd_value >= WHALE_MIN_USD:
+                                print(f"\n🐋 WHALE {tx_type} — {format_usd(usd_value)}")
+                                embed = build_whale_embed(tx_type, amount, wallet, usd_value, signature)
+                                await send_webhook([embed], ping_everyone=True)
+
+                            else:
+                                print(f"\nℹ️ Below threshold "
+                                      f"({format_usd(usd_value)} < {format_usd(WHALE_MIN_USD)})")
 
                     except asyncio.TimeoutError:
                         await ws.ping()
@@ -699,7 +871,7 @@ async def monitor():
             print(f"⏰ Reconnecting in {wait_time}s... (attempt {retry_count})")
             await asyncio.sleep(wait_time)
 
-# ------------------------------------------------------------
+                                                              
 
 async def main():
     try:
