@@ -355,6 +355,18 @@ def get_all_program_ids(tx_data: Dict) -> Set[str]:
             programs.add(pid)
     return programs
 
+def _pick_best_pair(pairs: List[Dict]) -> Optional[Dict]:
+    if not pairs:
+        return None
+    return max(
+        pairs,
+        key=lambda p: (
+            float((p.get("liquidity") or {}).get("usd") or 0),
+            float((p.get("volume") or {}).get("h24") or 0),
+            float(p.get("fdv") or p.get("marketCap") or 0),
+        ),
+    )
+
 class DiscordQueue:
     CAPACITY      = 25
     REFILL_PERIOD = 30.0
@@ -761,61 +773,59 @@ class TokenFlowAnalyzer:
         return result
     
     def _get_balance_changes(self, tx_data: Dict, user_wallet: str) -> Dict[str, float]:
-        """Get token movements from pre/post balance changes."""
+        """Get signer-owned token movements from pre/post token balances."""
         meta = tx_data.get("meta", {})
         pre_all = meta.get("preTokenBalances", []) or []
         post_all = meta.get("postTokenBalances", []) or []
-        
-        # Index balances by account
+
         pre_by_account = {}
-        post_by_account = {}    
-        
-        for bal in post_all:
+        post_by_account = {}
+
+        for bal in pre_all:
             if bal.get("owner") != user_wallet:
                 continue
-            idx  = bal.get("accountIndex")
+            idx = bal.get("accountIndex")
             mint = bal.get("mint")
             if idx is None or not mint:
                 continue
-            amount   = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
-            decimals = (bal.get("uiTokenAmount") or {}).get("decimals", 6)
+            amount = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
+            decimals = int((bal.get("uiTokenAmount") or {}).get("decimals") or 6)
+            self.token_decimals[mint] = decimals
+            pre_by_account[idx] = {"mint": mint, "amount": amount}
+
+        for bal in post_all:
+            if bal.get("owner") != user_wallet:
+                continue
+            idx = bal.get("accountIndex")
+            mint = bal.get("mint")
+            if idx is None or not mint:
+                continue
+            amount = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
+            decimals = int((bal.get("uiTokenAmount") or {}).get("decimals") or 6)
             self.token_decimals[mint] = decimals
             post_by_account[idx] = {"mint": mint, "amount": amount}
 
-        for bal in post_all:
-            if bal.get("owner") == user_wallet:
-                idx = bal.get("accountIndex")
-                mint = bal.get("mint")
-                amount = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
-                decimals = (bal.get("uiTokenAmount") or {}).get("decimals", 6)
-                self.token_decimals[mint] = decimals
-                post_by_account[idx] = {"mint": mint, "amount": amount}
-        
-        # Calculate changes
         changes = defaultdict(float)
         all_accounts = set(pre_by_account.keys()) | set(post_by_account.keys())
-        
+
         for idx in all_accounts:
             pre = pre_by_account.get(idx)
             post = post_by_account.get(idx)
-            
-            if pre and post:
-                if pre["mint"] == post["mint"]:
-                    delta = post["amount"] - pre["amount"]
-                    if delta != 0:
-                        decimals = self.token_decimals.get(pre["mint"], 6)
-                        changes[pre["mint"]] += delta / (10 ** decimals)
+
+            if pre and post and pre["mint"] == post["mint"]:
+                delta = post["amount"] - pre["amount"]
+                if delta != 0:
+                    decimals = self.token_decimals.get(pre["mint"], 6)
+                    changes[pre["mint"]] += delta / (10 ** decimals)
             elif post:
-                # New account
                 decimals = self.token_decimals.get(post["mint"], 6)
                 changes[post["mint"]] += post["amount"] / (10 ** decimals)
             elif pre:
-                # Account closed
                 decimals = self.token_decimals.get(pre["mint"], 6)
                 changes[pre["mint"]] -= pre["amount"] / (10 ** decimals)
-        
+
         return dict(changes)
-    
+        
     def _get_transfer_movements(self, tx_data: Dict, user_wallet: str) -> Dict[str, float]:
         """Extract token movements from all instruction transfers (inner and outer)."""
         meta = tx_data.get("meta", {})
@@ -833,31 +843,64 @@ class TokenFlowAnalyzer:
         
         return dict(movements)
     
-    def _process_instruction_for_transfers(self, ix: Dict, user_wallet: str, 
-                                           movements: Dict[str, float], tx_data: Dict):
-        """Process a single instruction for token transfers."""
+    def _process_instruction_for_transfers(
+        self, ix: Dict, user_wallet: str, movements: Dict[str, float], tx_data: Dict
+    ):
+        """Process a single instruction for token transfers using token-account owner resolution."""
         program_id = ix.get("programId")
-        
-        # Check all known token programs
+
         if program_id in TOKEN_PROGRAMS:
             transfer_info = self._decode_token_transfer(ix, tx_data)
-            if transfer_info:
-                mint = transfer_info.get("mint")
-                amount = transfer_info.get("amount", 0)
-                source = transfer_info.get("source")
-                dest = transfer_info.get("destination")
-                
-                decimals = self.token_decimals.get(mint, 6)
-                decimal_amount = amount / (10 ** decimals)
-                
-                if source == user_wallet:
-                    movements[mint] -= decimal_amount
-                elif dest == user_wallet:
-                    movements[mint] += decimal_amount
-        
-        # Check for swap program logs that indicate token amounts
+            if not transfer_info:
+                return
+
+            mint = transfer_info.get("mint")
+            amount = transfer_info.get("amount", 0)
+            source = transfer_info.get("source")
+            dest = transfer_info.get("destination")
+
+            if not mint or amount <= 0:
+                return
+
+            # Resolve token account -> owner
+            meta = tx_data.get("meta", {})
+            keys = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
+            key_list = [k.get("pubkey") if isinstance(k, dict) else k for k in keys]
+
+            account_owner: Dict[str, str] = {}
+            account_mint: Dict[str, str] = {}
+
+            for bal in (meta.get("preTokenBalances") or []) + (meta.get("postTokenBalances") or []):
+                idx = bal.get("accountIndex")
+                if idx is None or idx >= len(key_list):
+                    continue
+                token_acc = key_list[idx]
+                owner = bal.get("owner")
+                bal_mint = bal.get("mint")
+                if owner:
+                    account_owner[token_acc] = owner
+                if bal_mint:
+                    account_mint[token_acc] = bal_mint
+                    decimals = int((bal.get("uiTokenAmount") or {}).get("decimals") or 6)
+                    self.token_decimals[bal_mint] = decimals
+
+            source_owner = account_owner.get(source, source)
+            dest_owner = account_owner.get(dest, dest)
+
+            # Fallback mint resolution
+            mint = mint or account_mint.get(source) or account_mint.get(dest)
+            if not mint:
+                return
+
+            decimals = self.token_decimals.get(mint, 6)
+            decimal_amount = amount / (10 ** decimals)
+
+            if source_owner == user_wallet:
+                movements[mint] -= decimal_amount
+            if dest_owner == user_wallet:
+                movements[mint] += decimal_amount
+
         elif program_id in SWAP_PROGRAMS:
-            # Many DEXes emit swap amounts in logs
             self._extract_swap_amounts_from_logs(ix, user_wallet, movements, tx_data)
     
     def _decode_token_transfer(self, ix: Dict, tx_data: Dict) -> Optional[Dict]:
@@ -1073,39 +1116,110 @@ class TokenFlowAnalyzer:
         pass
 
 def _build_classify_prompt(tx_data: Dict, signer: str, suspicion_signals: List[str]) -> str:
-    meta     = tx_data.get("meta", {})
-    message  = tx_data.get("transaction", {}).get("message", {})
-    ixs      = message.get("instructions", [])
-    prog_ids = list({ix.get("programId") for ix in ixs if ix.get("programId")})
-    summary  = {
-        "signer":                signer,
-        "mint":                  MINT,
-        "programs_in_tx":        {pid: exchange_name(pid) for pid in prog_ids},
-        "log_messages":          (meta.get("logMessages") or [])[:30],
-        "pre_token_balances":    [b for b in (meta.get("preTokenBalances")  or []) if b.get("mint") == MINT],
-        "post_token_balances":   [b for b in (meta.get("postTokenBalances") or []) if b.get("mint") == MINT],
-        "sol_pre":               (meta.get("preBalances",  []))[:8],
-        "sol_post":              (meta.get("postBalances", []))[:8],
-        "suspicion_signals":     suspicion_signals,
-        "known_limit_programs":  {pid: exchange_name(pid) for pid in LIMIT_ORDER_PROGRAMS},
+    meta = tx_data.get("meta", {})
+    all_ixs = get_all_instructions(tx_data)
+    prog_ids = list({ix.get("programId") for ix in all_ixs if ix.get("programId")})
+
+    deltas = get_signer_token_deltas(tx_data, signer)
+    target_delta = deltas.get(MINT, 0.0)
+
+    negative_quotes = []
+    positive_quotes = []
+    for mint, delta in deltas.items():
+        if mint == MINT or abs(delta) < 1e-12:
+            continue
+        if delta < 0:
+            negative_quotes.append((mint, abs(delta)))
+        elif delta > 0:
+            positive_quotes.append((mint, abs(delta)))
+
+    def pick_quote(cands: List[Tuple[str, float]]) -> Optional[str]:
+        if not cands:
+            return None
+        preferred = [
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+            WSOL_MINT,
+        ]
+        for pref in preferred:
+            for mint, _ in cands:
+                if mint == pref:
+                    return mint
+        return max(cands, key=lambda x: x[1])[0]
+
+    quote_out_mint = pick_quote(negative_quotes)
+    quote_in_mint = pick_quote(positive_quotes)
+
+    signer_idx = None
+    keys = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
+    for i, k in enumerate(keys):
+        pub = k.get("pubkey") if isinstance(k, dict) else k
+        if pub == signer:
+            signer_idx = i
+            break
+
+    signer_sol_delta = 0.0
+    pre_bal = meta.get("preBalances", [])
+    post_bal = meta.get("postBalances", [])
+    if signer_idx is not None and signer_idx < len(pre_bal) and signer_idx < len(post_bal):
+        signer_sol_delta = (post_bal[signer_idx] - pre_bal[signer_idx]) / 1e9
+
+    has_cancel = False
+    has_new_order = False
+    for ix in all_ixs:
+        raw = TransactionClassifier._decode_ix_data(ix.get("data", ""))
+        if raw and len(raw) >= 8:
+            disc = DISCRIMINATORS.get(raw[:8])
+            if disc == "cancel_order":
+                has_cancel = True
+            elif disc == "new_order":
+                has_new_order = True
+
+    logs_lc = " ".join(meta.get("logMessages") or []).lower()
+    if "cancel" in logs_lc or "withdraw order" in logs_lc or "close order" in logs_lc:
+        has_cancel = True
+    if any(k in logs_lc for k in ["new order", "place order", "post only", "post-only", "limit"]):
+        has_new_order = True
+
+    swap_like = bool(set(prog_ids) & (ALL_SWAP_PROGRAMS | DEX_PROGRAMS))
+    limit_like = bool(set(prog_ids) & LIMIT_ORDER_PROGRAMS)
+
+    summary = {
+        "signer": signer,
+        "mint": MINT,
+        "programs_in_tx": {pid: exchange_name(pid) for pid in prog_ids},
+        "signer_token_deltas": {
+            KNOWN_TOKEN_LABELS.get(m, m[:8] + "…"): d for m, d in deltas.items()
+        },
+        "target_token_delta": target_delta,
+        "quote_out_mint": KNOWN_TOKEN_LABELS.get(quote_out_mint, quote_out_mint[:8] + "…" if quote_out_mint else None),
+        "quote_in_mint": KNOWN_TOKEN_LABELS.get(quote_in_mint, quote_in_mint[:8] + "…" if quote_in_mint else None),
+        "signer_sol_delta": signer_sol_delta,
+        "swap_like": swap_like,
+        "limit_like": limit_like,
+        "has_cancel": has_cancel,
+        "has_new_order": has_new_order,
+        "log_messages": (meta.get("logMessages") or [])[:30],
+        "suspicion_signals": suspicion_signals,
+        "known_limit_programs": {pid: exchange_name(pid) for pid in LIMIT_ORDER_PROGRAMS},
         "known_market_programs": {pid: exchange_name(pid) for pid in DEX_PROGRAMS},
     }
+
     return (
         "You are a Solana on-chain transaction analyst specialising in DeFi order types.\n\n"
         "Classify this transaction into EXACTLY ONE of:\n"
         "  MARKET_BUY, MARKET_SELL, LIMIT_BUY, LIMIT_SELL, CANCEL_LIMIT, TRANSFER, UNKNOWN\n\n"
-        "Definitions:\n"
-        "  LIMIT_BUY/SELL  — tokens locked on a limit-order program, NOT yet filled\n"
-        "  MARKET_BUY/SELL — tokens transferred immediately via AMM/swap\n"
-        "  CANCEL_LIMIT    — a previously placed limit order is withdrawn\n"
-        "  TRANSFER        — peer-to-peer token move, no exchange involved\n"
-        "  UNKNOWN         — cannot classify with reasonable confidence\n\n"
-        "Key indicators:\n"
-        "  - Phoenix DEX, OpenBook, DFlow, OKX LO, Jupiter LO v2, Raydium LO → LIMIT\n"
-        "  - Raydium CLMM range position with zero immediate fill → LIMIT\n"
-        "  - cancel/close log lines from a limit program → CANCEL_LIMIT\n"
-        "  - Signer receives tokens immediately → MARKET\n"
-        "  - SOL deposited with zero token receipt → likely LIMIT placement\n\n"
+        "Rules:\n"
+        "  - MARKET_BUY: signer target token balance increased now and signer paid a quote asset now with swap evidence.\n"
+        "  - MARKET_SELL: signer target token balance decreased now and signer received a quote asset now with swap evidence.\n"
+        "  - LIMIT_BUY/SELL: known limit-order protocol with order-placement evidence and no immediate normal swap settlement.\n"
+        "  - CANCEL_LIMIT: cancel/withdraw/close of a prior limit order.\n"
+        "  - TRANSFER: token moved without swap/order evidence.\n"
+        "  - UNKNOWN: insufficient evidence.\n\n"
+        "Hard constraints:\n"
+        "  - If target_token_delta == 0, do NOT classify as MARKET_BUY or MARKET_SELL.\n"
+        "  - If has_cancel == true, strongly prefer CANCEL_LIMIT.\n"
+        "  - Do not rely on log words if balance changes contradict them.\n\n"
         f"Transaction data:\n{json.dumps(summary, indent=2)}\n\n"
         "Respond with ONLY valid JSON (no markdown, no extra text):\n"
         '{"order_type":"<ONE>","confidence":<0.0-1.0>,'
@@ -1254,9 +1368,7 @@ class TransactionClassifier:
         if GROQ_ENABLED:
             order_type, info, conf = await self._groq_classify(tx_data, signer, ms, signals)
             if order_type != OrderType.UNKNOWN and conf >= GROQ_MIN_CONFIDENCE:
-                message     = tx_data.get("transaction", {}).get("message", {})
-                ixs         = message.get("instructions", [])
-                program_ids = {ix.get("programId") for ix in ixs if ix.get("programId")}
+                program_ids = get_all_program_ids(tx_data)
                 self._learn(program_ids, order_type, info.get("exchange", "Unknown"), conf)
                 all_known        = ALL_KNOWN_PROGRAMS | set(self._learned.keys())
                 has_unknown_pids = bool(program_ids - all_known - SYSTEM_PROGRAMS)
@@ -1780,7 +1892,10 @@ class TransactionClassifier:
     def _estimate_target_price(self, tx_data: Dict, token_amount: float, ms: MarketState) -> float:
         if token_amount <= 0:
             return ms.current_price
-        meta        = tx_data.get("meta", {})
+
+        meta = tx_data.get("meta", {})
+
+        # 1. Use stablecoin / WSOL output if available
         output_mint = self._find_output_mint_from_accounts(tx_data)
         if output_mint and output_mint != WSOL_MINT:
             output_usd = self._token_amount_to_usd(tx_data, output_mint, ms)
@@ -1788,17 +1903,31 @@ class TransactionClassifier:
                 candidate = output_usd / token_amount
                 if self._price_is_sane(candidate, ms):
                     return candidate
-        pre_b  = meta.get("preBalances",  [])
+
+        # 2. Use signer-only SOL delta, not max delta across all accounts
+        keys = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
+        signer = None
+        if keys:
+            signer = keys[0].get("pubkey") if isinstance(keys[0], dict) else keys[0]
+
+        signer_idx = None
+        if signer:
+            for i, k in enumerate(keys):
+                pub = k.get("pubkey") if isinstance(k, dict) else k
+                if pub == signer:
+                    signer_idx = i
+                    break
+
+        pre_b = meta.get("preBalances", [])
         post_b = meta.get("postBalances", [])
-        if pre_b and post_b:
-            sol_locked = max(
-                (abs(post_b[i] - pre_b[i]) for i in range(min(len(pre_b), len(post_b)))),
-                default=0,
-            ) / 1e9
-            if sol_locked > 0.001 and ms.sol_price_usd > 0:
-                candidate = (sol_locked * ms.sol_price_usd) / token_amount
+        if signer_idx is not None and signer_idx < len(pre_b) and signer_idx < len(post_b):
+            sol_spent = abs(post_b[signer_idx] - pre_b[signer_idx]) / 1e9
+            if sol_spent > 0.001 and ms.sol_price_usd > 0:
+                candidate = (sol_spent * ms.sol_price_usd) / token_amount
                 if self._price_is_sane(candidate, ms):
                     return candidate
+
+        # 3. Parse explicit price logs
         for line in (meta.get("logMessages") or []):
             for kw in ("price:", "Price:", "limit_price:", "limitPrice:"):
                 idx = line.find(kw)
@@ -1809,6 +1938,7 @@ class TransactionClassifier:
                             return c
                     except (ValueError, IndexError):
                         pass
+
         return ms.current_price * 0.97
 
     @staticmethod
@@ -2272,16 +2402,19 @@ async def update_price(ms: MarketState) -> None:
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{MINT}"
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r    = await client.get(url)
+            r = await client.get(url)
             data = r.json()
+
         pairs = data.get("pairs") or []
-        if not pairs:
+        pair = _pick_best_pair(pairs)
+        if not pair:
             print("⚠️ No pairs on DexScreener")
             return
-        pair      = pairs[0]
+
         new_price = float(pair.get("priceUsd") or 0)
-        fdv       = pair.get("fdv")
-        mcap      = pair.get("marketCap")
+        fdv = pair.get("fdv")
+        mcap = pair.get("marketCap")
+
         if fdv:
             ms.current_market_cap = float(fdv)
         elif mcap:
@@ -2289,11 +2422,14 @@ async def update_price(ms: MarketState) -> None:
         elif new_price > 0:
             liq = float((pair.get("liquidity") or {}).get("usd") or 0)
             ms.current_market_cap = liq * 2
+
         if ms.price_reference == 0.0 and new_price > 0:
             ms.price_reference = new_price
-        ms.current_price     = new_price
+
+        ms.current_price = new_price
         ms.last_price_update = time.time()
         print(f"💰 ${ms.current_price:.8f}  |  MCap {format_usd(ms.current_market_cap)}")
+
         if ms.price_reference > 0:
             await _check_price_alert(ms)
     except Exception as e:
@@ -2347,23 +2483,25 @@ async def fetch_tx(signature: str, retries: int = 3) -> Optional[Dict]:
 async def fetch_price_for_ca(ca: str) -> dict:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r    = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{ca}")
+            r = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{ca}")
             data = r.json()
-            pairs = data.get("pairs") or []
-            if not pairs:
-                return {}
-            p = pairs[0]
-            return {
-                "price":      float(p.get("priceUsd") or 0),
-                "mcap":       float(p.get("fdv") or p.get("marketCap") or 0),
-                "volume_24h": float((p.get("volume") or {}).get("h24") or 0),
-                "change_24h": float(p.get("priceChange", {}).get("h24") or 0),
-                "liquidity":  float((p.get("liquidity") or {}).get("usd") or 0),
-                "dex":        p.get("dexId", "unknown"),
-                "pair_addr":  p.get("pairAddress", ""),
-                "name":       p.get("baseToken", {}).get("name", "Unknown"),
-                "symbol":     p.get("baseToken", {}).get("symbol", "???"),
-            }
+
+        pairs = data.get("pairs") or []
+        p = _pick_best_pair(pairs)
+        if not p:
+            return {}
+
+        return {
+            "price": float(p.get("priceUsd") or 0),
+            "mcap": float(p.get("fdv") or p.get("marketCap") or 0),
+            "volume_24h": float((p.get("volume") or {}).get("h24") or 0),
+            "change_24h": float((p.get("priceChange") or {}).get("h24") or 0),
+            "liquidity": float((p.get("liquidity") or {}).get("usd") or 0),
+            "dex": p.get("dexId", "unknown"),
+            "pair_addr": p.get("pairAddress", ""),
+            "name": p.get("baseToken", {}).get("name", "Unknown"),
+            "symbol": p.get("baseToken", {}).get("symbol", "???"),
+        }
     except Exception as e:
         print(f"❌ DexScreener error: {e}")
         return {}
