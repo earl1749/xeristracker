@@ -292,7 +292,68 @@ def _expiry_bar(order: Dict) -> str:
     filled    = max(0, 10 - round(pct_used * 10))
     empty     = 10 - filled
     return "█" * filled + "░" * empty
+def get_all_instructions(tx_data: Dict) -> List[Dict]:
+    """
+    Return both outer + inner instructions in one flat list.
+    """
+    message = tx_data.get("transaction", {}).get("message", {})
+    meta = tx_data.get("meta", {})
 
+    out = list(message.get("instructions", []) or [])
+    for group in meta.get("innerInstructions", []) or []:
+        out.extend(group.get("instructions", []) or [])
+    return out
+
+def get_signer_token_deltas(tx_data: Dict, signer: str) -> Dict[str, float]:
+    """
+    Compute token deltas ONLY for token accounts owned by the signer.
+    Returns: {mint: net_delta_ui_amount}
+    """
+    meta = tx_data.get("meta", {})
+
+    pre = [b for b in (meta.get("preTokenBalances") or []) if b.get("owner") == signer]
+    post = [b for b in (meta.get("postTokenBalances") or []) if b.get("owner") == signer]
+
+    pre_map: Dict[Tuple[str, int], Tuple[int, int]] = {}
+    post_map: Dict[Tuple[str, int], Tuple[int, int]] = {}
+
+    for bal in pre:
+        mint = bal.get("mint")
+        idx = bal.get("accountIndex")
+        if mint is None or idx is None:
+            continue
+        amt = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
+        dec = int((bal.get("uiTokenAmount") or {}).get("decimals") or 0)
+        pre_map[(mint, idx)] = (amt, dec)
+
+    for bal in post:
+        mint = bal.get("mint")
+        idx = bal.get("accountIndex")
+        if mint is None or idx is None:
+            continue
+        amt = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
+        dec = int((bal.get("uiTokenAmount") or {}).get("decimals") or 0)
+        post_map[(mint, idx)] = (amt, dec)
+
+    deltas = defaultdict(float)
+    all_keys = set(pre_map) | set(post_map)
+
+    for mint, idx in all_keys:
+        pre_amt, pre_dec = pre_map.get((mint, idx), (0, 0))
+        post_amt, post_dec = post_map.get((mint, idx), (0, pre_dec))
+        dec = post_dec if post_dec else pre_dec
+        divisor = 10 ** dec if dec >= 0 else 1
+        deltas[mint] += (post_amt - pre_amt) / divisor
+
+    return dict(deltas)
+
+def get_all_program_ids(tx_data: Dict) -> Set[str]:
+    programs = set()
+    for ix in get_all_instructions(tx_data):
+        pid = ix.get("programId")
+        if pid:
+            programs.add(pid)
+    return programs
 
 class DiscordQueue:
     CAPACITY      = 25
@@ -339,6 +400,7 @@ class DiscordQueue:
 
 
 _discord_queue: Optional[DiscordQueue] = None
+
 
 def init_discord_queue() -> None:
     global _discord_queue
@@ -1208,127 +1270,242 @@ class TransactionClassifier:
     def _rule_based(
         self, tx_data: Dict, signer: str, ms: MarketState
     ) -> Tuple[OrderType, Optional[Dict]]:
-        meta    = tx_data.get("meta", {})
-        message = tx_data.get("transaction", {}).get("message", {})
-        ixs     = message.get("instructions", [])
-
+        meta = tx_data.get("meta", {})
         if meta.get("err"):
             return OrderType.UNKNOWN, None
 
-        program_ids: set = {ix.get("programId") for ix in ixs if ix.get("programId")}
+        programs = get_all_program_ids(tx_data)
+        all_ixs = get_all_instructions(tx_data)
+        deltas = get_signer_token_deltas(tx_data, signer)
+        target_delta = deltas.get(MINT, 0.0)
 
-        learned_limit_hits = {p for p in program_ids if self._known_role(p) in ("limit", "hybrid")}
-        limit_hits         = program_ids & LIMIT_ORDER_PROGRAMS | learned_limit_hits
-        has_cancel         = self._has_cancel_instruction(ixs)
+        learned_limit_hits = {p for p in programs if self._known_role(p) in ("limit", "hybrid")}
+        learned_market_hits = {p for p in programs if self._known_role(p) in ("market", "hybrid")}
 
-        # Handle cancel BEFORE needing token_result
+        limit_hits = (programs & LIMIT_ORDER_PROGRAMS) | learned_limit_hits
+        market_hits = (programs & ALL_SWAP_PROGRAMS) | (programs & DEX_PROGRAMS) | learned_market_hits
+
+        # cancel detection: outer + inner
+        has_cancel = False
+        for ix in all_ixs:
+            raw = self._decode_ix_data(ix.get("data", ""))
+            if raw and len(raw) >= 8 and DISCRIMINATORS.get(raw[:8]) == "cancel_order":
+                has_cancel = True
+                break
+
+        logs_lc = " ".join(meta.get("logMessages") or []).lower()
+        if "cancel" in logs_lc or "withdraw order" in logs_lc or "close order" in logs_lc:
+            has_cancel = True
+
+        # new-order detection: outer + inner
+        has_new_order = False
+        for ix in all_ixs:
+            raw = self._decode_ix_data(ix.get("data", ""))
+            if raw and len(raw) >= 8 and DISCRIMINATORS.get(raw[:8]) == "new_order":
+                has_new_order = True
+                break
+
+        if any(k in logs_lc for k in ["new order", "place order", "post only", "post-only", "limit"]):
+            has_new_order = True
+
+        # quote token helpers
+        negative_quotes = []
+        positive_quotes = []
+        for mint, delta in deltas.items():
+            if mint == MINT or abs(delta) < 1e-12:
+                continue
+            if delta < 0:
+                negative_quotes.append((mint, abs(delta)))
+            elif delta > 0:
+                positive_quotes.append((mint, abs(delta)))
+
+        def pick_quote(cands: List[Tuple[str, float]]) -> Optional[str]:
+            if not cands:
+                return None
+            preferred = [
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+                "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+                WSOL_MINT,
+            ]
+            for pref in preferred:
+                for mint, _ in cands:
+                    if mint == pref:
+                        return mint
+            return max(cands, key=lambda x: x[1])[0]
+
+        def quote_usd_value(mint: Optional[str], abs_amount: float) -> float:
+            if not mint or abs_amount <= 0:
+                return 0.0
+            if mint in (
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+                "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+            ):
+                return abs_amount
+            if mint == WSOL_MINT:
+                return abs_amount * ms.sol_price_usd
+            return 0.0
+
+        # -------------------------------------------------
+        # 1) CANCEL LIMIT
+        # -------------------------------------------------
         if limit_hits and has_cancel:
             return OrderType.CANCEL_LIMIT, {
-                "wallet":      signer,
-                "signature":   tx_data.get("signature", ""),
-                "exchange":    ", ".join(
+                "wallet": signer,
+                "signature": tx_data.get("signature", ""),
+                "exchange": ", ".join(
                     exchange_name(p) if p in EXCHANGE_REGISTRY
                     else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
-                    for p in limit_hits
+                    for p in sorted(limit_hits)
                 ),
                 "quote_token": "",
             }
 
-        token_result = self._parse_token_changes(tx_data, signer)
+        # -------------------------------------------------
+        # 2) MARKET BUY / SELL
+        # -------------------------------------------------
+        if abs(target_delta) > 1e-12 and market_hits:
+            if target_delta > 0:
+                quote_mint = pick_quote(negative_quotes)
+                quote_symbol = KNOWN_TOKEN_LABELS.get(
+                    quote_mint, f"{quote_mint[:8]}…" if quote_mint else "SOL"
+                )
+                usd_value = quote_usd_value(quote_mint, abs(deltas.get(quote_mint, 0.0)))
+                if usd_value <= 0:
+                    usd_value = target_delta * ms.current_price
 
-        if not token_result:
-            # Could still be a limit placement from a known program
+                ex_names = [
+                    exchange_name(p) if p in EXCHANGE_REGISTRY
+                    else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
+                    for p in sorted(market_hits)
+                ]
+                return OrderType.MARKET_BUY, {
+                    "wallet": signer,
+                    "amount": target_delta,
+                    "usd_value": usd_value,
+                    "exchange": ", ".join(ex_names),
+                    "quote_token": quote_symbol,
+                }
+
+            if target_delta < 0:
+                quote_mint = pick_quote(positive_quotes)
+                quote_symbol = KNOWN_TOKEN_LABELS.get(
+                    quote_mint, f"{quote_mint[:8]}…" if quote_mint else "SOL"
+                )
+                usd_value = quote_usd_value(quote_mint, abs(deltas.get(quote_mint, 0.0)))
+                if usd_value <= 0:
+                    usd_value = abs(target_delta) * ms.current_price
+
+                ex_names = [
+                    exchange_name(p) if p in EXCHANGE_REGISTRY
+                    else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
+                    for p in sorted(market_hits)
+                ]
+                return OrderType.MARKET_SELL, {
+                    "wallet": signer,
+                    "amount": abs(target_delta),
+                    "usd_value": usd_value,
+                    "exchange": ", ".join(ex_names),
+                    "quote_token": quote_symbol,
+                }
+
+        # -------------------------------------------------
+        # 3) LIMIT PLACEMENT
+        # -------------------------------------------------
+        if limit_hits:
+            limit_score = 0.0
             if limit_hits:
-                meta   = tx_data.get("meta", {})
-                pre_b  = meta.get("preBalances", [])
-                post_b = meta.get("postBalances", [])
-                sol_locked = max(
-                    (abs(post_b[i] - pre_b[i]) for i in range(min(len(pre_b), len(post_b)))),
-                    default=0,
-                ) / 1e9
-                usd_val = sol_locked * ms.sol_price_usd
-                if usd_val > 0:
-                    tp    = ms.current_price
-                    pmc   = self._predict_mcap(tp, ms)
-                    names = [
+                limit_score += 0.45
+            if has_new_order:
+                limit_score += 0.30
+            if "order" in logs_lc or "place" in logs_lc or "limit" in logs_lc:
+                limit_score += 0.15
+            if abs(target_delta) < 1e-12:
+                limit_score += 0.15
+            if market_hits and abs(target_delta) > 1e-12:
+                limit_score -= 0.45
+
+            if limit_score >= 0.70:
+                # LIMIT BUY: no immediate XERIS receipt, signer spent quote asset
+                if abs(target_delta) < 1e-12:
+                    quote_mint = pick_quote(negative_quotes)
+
+                    usd_value = quote_usd_value(quote_mint, abs(deltas.get(quote_mint, 0.0)))
+                    if usd_value <= 0:
+                        # fallback: signer SOL balance delta only
+                        keys = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
+                        signer_idx = None
+                        for i, k in enumerate(keys):
+                            pub = k.get("pubkey") if isinstance(k, dict) else k
+                            if pub == signer:
+                                signer_idx = i
+                                break
+
+                        if signer_idx is not None:
+                            pre_b = meta.get("preBalances", [])
+                            post_b = meta.get("postBalances", [])
+                            if signer_idx < len(pre_b) and signer_idx < len(post_b):
+                                signer_sol_spent = max(0.0, (pre_b[signer_idx] - post_b[signer_idx]) / 1e9)
+                                usd_value = signer_sol_spent * ms.sol_price_usd
+
+                    if usd_value > 0:
+                        amount = usd_value / ms.current_price if ms.current_price > 0 else 0.0
+                        tp = ms.current_price
+                        pmc = self._predict_mcap(tp, ms)
+
+                        ex_names = [
+                            exchange_name(p) if p in EXCHANGE_REGISTRY
+                            else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
+                            for p in sorted(limit_hits)
+                        ]
+                        return OrderType.LIMIT_BUY, {
+                            "wallet": signer,
+                            "amount": amount,
+                            "usd_value": usd_value,
+                            "target_price": tp,
+                            "predicted_mcap": pmc,
+                            "exchange": ", ".join(ex_names),
+                            "quote_token": KNOWN_TOKEN_LABELS.get(
+                                quote_mint, f"{quote_mint[:8]}…" if quote_mint else ""
+                            ),
+                        }
+
+                # LIMIT SELL: signer target token decreased under limit protocol without swap-style quote receipt
+                if target_delta < 0 and not market_hits:
+                    amount = abs(target_delta)
+                    usd_value = amount * ms.current_price
+                    tp = ms.current_price
+                    pmc = self._predict_mcap(tp, ms)
+
+                    ex_names = [
                         exchange_name(p) if p in EXCHANGE_REGISTRY
                         else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
-                        for p in limit_hits
+                        for p in sorted(limit_hits)
                     ]
-                    return OrderType.LIMIT_BUY, {
-                        "wallet":         signer,
-                        "amount":         0,
-                        "usd_value":      usd_val,
-                        "target_price":   tp,
+                    return OrderType.LIMIT_SELL, {
+                        "wallet": signer,
+                        "amount": amount,
+                        "usd_value": usd_value,
+                        "target_price": tp,
                         "predicted_mcap": pmc,
-                        "exchange":       ", ".join(names),
-                        "quote_token":    "",
+                        "exchange": ", ".join(ex_names),
+                        "quote_token": "",
                     }
-            return OrderType.UNKNOWN, None
 
-        tx_type, amount, wallet, quote_token = token_result
-
-        if tx_type == "TRANSFER":
+        # -------------------------------------------------
+        # 4) TRANSFER
+        # -------------------------------------------------
+        non_target_changes = [
+            mint for mint, delta in deltas.items()
+            if mint != MINT and abs(delta) > 1e-12
+        ]
+        if abs(target_delta) > 1e-12 and not limit_hits and not market_hits and not non_target_changes:
             return OrderType.TRANSFER, {
-                "wallet":      wallet,
-                "amount":      amount,
-                "usd_value":   amount * ms.current_price,
-                "to":          quote_token or "unknown",
+                "wallet": signer,
+                "amount": abs(target_delta),
+                "usd_value": abs(target_delta) * ms.current_price,
+                "to": "unknown",
                 "quote_token": "",
             }
-
-        usd_value = amount * ms.current_price
-
-        hybrid_hits = {
-            p for p in program_ids
-            if EXCHANGE_REGISTRY.get(p, {}).get("role") == "hybrid"
-            or self._learned.get(p, {}).get("role") == "hybrid"
-        }
-        # Bug 6 fix — use analyzer instead of _token_delta
-        if hybrid_hits:
-            analyzer = TokenFlowAnalyzer(MINT)
-            analysis = analyzer.analyze_transaction(tx_data, signer)
-            if not analysis["has_target_token_movement"]:
-                limit_hits |= hybrid_hits
-
-        if limit_hits:
-            if amount <= 0 or usd_value <= 0:
-                return OrderType.UNKNOWN, None
-            tp    = self._estimate_target_price(tx_data, amount, ms)
-            pmc   = self._predict_mcap(tp, ms)
-            names = []
-            for p in limit_hits:
-                if p in EXCHANGE_REGISTRY:
-                    names.append(exchange_name(p))
-                else:
-                    names.append(self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)"))
-            return (
-                OrderType.LIMIT_BUY if tx_type == "BUY" else OrderType.LIMIT_SELL,
-                {
-                    "wallet":         wallet,
-                    "amount":         amount,
-                    "usd_value":      usd_value,
-                    "target_price":   tp,
-                    "predicted_mcap": pmc,
-                    "exchange":       ", ".join(names),
-                    "quote_token":    quote_token or "",
-                },
-            )
-
-        all_known = ALL_KNOWN_PROGRAMS | set(self._learned.keys())
-        if program_ids & all_known:
-            pid_hit = next(iter(program_ids & all_known), "")
-            ex = (exchange_name(pid_hit) if pid_hit in EXCHANGE_REGISTRY
-                else self._learned.get(pid_hit, {}).get("name", f"Learned ({pid_hit[:8]}…)"))
-            info = {
-                "wallet":      wallet,
-                "amount":      amount,
-                "usd_value":   usd_value,
-                "exchange":    ex,
-                "quote_token": quote_token or "",
-            }
-            if tx_type == "BUY":  return OrderType.MARKET_BUY,  info
-            if tx_type == "SELL": return OrderType.MARKET_SELL, info
 
         return OrderType.UNKNOWN, None
 
@@ -1423,59 +1600,79 @@ class TransactionClassifier:
 
     def _parse_token_changes(
         self, tx_data: Dict, signer: str
-        ) -> Optional[Tuple[str, float, str, str]]:
+    ) -> Optional[Tuple[str, float, str, str]]:
         """
-        Universal token change parser that works with ANY smart contract.
+        Signer-centric parser.
+
+        Returns:
+        ("BUY", amount, signer, quote_symbol)
+        ("SELL", amount, signer, quote_symbol)
+        ("TRANSFER", amount, signer, receiver_or_unknown)
+        or None
         """
-        analyzer = TokenFlowAnalyzer(MINT)
-        analysis = analyzer.analyze_transaction(tx_data, signer)
-        
-        # If no target token movement, not relevant
-        if not analysis["has_target_token_movement"]:
+        deltas = get_signer_token_deltas(tx_data, signer)
+        target_delta = deltas.get(MINT, 0.0)
+
+        if abs(target_delta) < 1e-12:
             return None
-        
-        target_change = analysis["target_token_change"]
-        swap_info = analysis["swap_info"]
-        programs = analysis["programs_involved"]
-        tx_type = analysis["transaction_type"]
-        
-        # Handle different transaction types
-        if tx_type == "TRANSFER":
-            # Find recipient
-            meta = tx_data.get("meta", {})
-            receiver = "unknown"
-            for bal in meta.get("postTokenBalances", []) or []:
-                if bal.get("mint") == MINT and bal.get("owner") != signer:
-                    receiver = bal.get("owner")
-                    break
-            return ("TRANSFER", abs(target_change), signer, receiver)
-        
-        elif tx_type in ["MARKET_BUY", "MARKET_SELL"]:
-            # Find the quote token (the other main token in the swap)
-            quote_token = None
-            if swap_info["main_in_token"] and swap_info["main_in_token"] != MINT:
-                quote_token = swap_info["main_in_token"]
-            elif swap_info["main_out_token"] and swap_info["main_out_token"] != MINT:
-                quote_token = swap_info["main_out_token"]
-            
-            quote_symbol = KNOWN_TOKEN_LABELS.get(quote_token, quote_token[:8] + "…" if quote_token else "SOL")
-            
-            if target_change > 0:
-                return ("BUY", target_change, signer, quote_symbol)
-            else:
-                return ("SELL", abs(target_change), signer, quote_symbol)
-        
-        elif tx_type == "LIMIT_PLACEMENT":
-            # This is a limit order placement - should be handled separately
-            return None
-        
-        elif tx_type == "LIMIT_FILL":
-            # This is a limit order being filled
-            if target_change > 0:
-                return ("BUY", target_change, signer, "LIMIT")
-            else:
-                return ("SELL", abs(target_change), signer, "LIMIT")
-        
+
+        programs = get_all_program_ids(tx_data)
+        swap_like = bool(programs & ALL_SWAP_PROGRAMS or programs & DEX_PROGRAMS)
+        limit_like = bool(programs & LIMIT_ORDER_PROGRAMS)
+
+        # Find strongest quote candidates from signer deltas
+        negative_quotes = []
+        positive_quotes = []
+
+        for mint, delta in deltas.items():
+            if mint == MINT or abs(delta) < 1e-12:
+                continue
+            if delta < 0:
+                negative_quotes.append((mint, abs(delta)))
+            elif delta > 0:
+                positive_quotes.append((mint, abs(delta)))
+
+        # Prefer stablecoin / SOL as quote token if present
+        def pick_quote(cands: List[Tuple[str, float]]) -> Optional[str]:
+            if not cands:
+                return None
+            preferred = [
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+                "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+                WSOL_MINT,
+            ]
+            for pref in preferred:
+                for mint, _ in cands:
+                    if mint == pref:
+                        return mint
+            return max(cands, key=lambda x: x[1])[0]
+
+        # MARKET BUY
+        if target_delta > 0:
+            quote_mint = pick_quote(negative_quotes)
+            quote_symbol = KNOWN_TOKEN_LABELS.get(
+                quote_mint, f"{quote_mint[:8]}…" if quote_mint else "SOL"
+            )
+
+            if swap_like:
+                return ("BUY", target_delta, signer, quote_symbol)
+
+            if not limit_like:
+                return ("TRANSFER", target_delta, signer, "unknown")
+
+        # MARKET SELL
+        if target_delta < 0:
+            quote_mint = pick_quote(positive_quotes)
+            quote_symbol = KNOWN_TOKEN_LABELS.get(
+                quote_mint, f"{quote_mint[:8]}…" if quote_mint else "SOL"
+            )
+
+            if swap_like:
+                return ("SELL", abs(target_delta), signer, quote_symbol)
+
+            if not limit_like:
+                return ("TRANSFER", abs(target_delta), signer, "unknown")
+
         return None
 
     @staticmethod
