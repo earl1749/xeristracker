@@ -1118,7 +1118,7 @@ class TokenFlowAnalyzer:
 def _build_classify_prompt(tx_data: Dict, signer: str, suspicion_signals: List[str]) -> str:
     meta = tx_data.get("meta", {})
     all_ixs = get_all_instructions(tx_data)
-    prog_ids = list({ix.get("programId") for ix in all_ixs if ix.get("programId")})
+    prog_ids = sorted({ix.get("programId") for ix in all_ixs if ix.get("programId")})
 
     deltas = get_signer_token_deltas(tx_data, signer)
     target_delta = deltas.get(MINT, 0.0)
@@ -1137,8 +1137,8 @@ def _build_classify_prompt(tx_data: Dict, signer: str, suspicion_signals: List[s
         if not cands:
             return None
         preferred = [
-            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
             WSOL_MINT,
         ]
         for pref in preferred:
@@ -1181,50 +1181,81 @@ def _build_classify_prompt(tx_data: Dict, signer: str, suspicion_signals: List[s
     if any(k in logs_lc for k in ["new order", "place order", "post only", "post-only", "limit"]):
         has_new_order = True
 
-    swap_like = bool(set(prog_ids) & (ALL_SWAP_PROGRAMS | DEX_PROGRAMS))
-    limit_like = bool(set(prog_ids) & LIMIT_ORDER_PROGRAMS)
+    known_market_hits = sorted(set(prog_ids) & (ALL_SWAP_PROGRAMS | DEX_PROGRAMS))
+    known_limit_hits = sorted(set(prog_ids) & LIMIT_ORDER_PROGRAMS)
+    swap_like = bool(known_market_hits)
+    limit_like = bool(known_limit_hits)
 
-    summary = {
+    facts = {
         "signer": signer,
-        "mint": MINT,
-        "programs_in_tx": {pid: exchange_name(pid) for pid in prog_ids},
-        "signer_token_deltas": {
-            KNOWN_TOKEN_LABELS.get(m, m[:8] + "…"): d for m, d in deltas.items()
-        },
+        "target_mint": MINT,
         "target_token_delta": target_delta,
+        "signer_sol_delta": signer_sol_delta,
+        "signer_token_deltas": {
+            (KNOWN_TOKEN_LABELS.get(m, m[:8] + "…")): d for m, d in deltas.items()
+        },
         "quote_out_mint": KNOWN_TOKEN_LABELS.get(quote_out_mint, quote_out_mint[:8] + "…" if quote_out_mint else None),
         "quote_in_mint": KNOWN_TOKEN_LABELS.get(quote_in_mint, quote_in_mint[:8] + "…" if quote_in_mint else None),
-        "signer_sol_delta": signer_sol_delta,
+        "program_ids": prog_ids,
+        "known_market_hits": known_market_hits,
+        "known_limit_hits": known_limit_hits,
         "swap_like": swap_like,
         "limit_like": limit_like,
         "has_cancel": has_cancel,
         "has_new_order": has_new_order,
-        "log_messages": (meta.get("logMessages") or [])[:30],
         "suspicion_signals": suspicion_signals,
-        "known_limit_programs": {pid: exchange_name(pid) for pid in LIMIT_ORDER_PROGRAMS},
-        "known_market_programs": {pid: exchange_name(pid) for pid in DEX_PROGRAMS},
+        "log_messages_sample": (meta.get("logMessages") or [])[:20],
     }
 
-    return (
-        "You are a Solana on-chain transaction analyst specialising in DeFi order types.\n\n"
-        "Classify this transaction into EXACTLY ONE of:\n"
-        "  MARKET_BUY, MARKET_SELL, LIMIT_BUY, LIMIT_SELL, CANCEL_LIMIT, TRANSFER, UNKNOWN\n\n"
-        "Rules:\n"
-        "  - MARKET_BUY: signer target token balance increased now and signer paid a quote asset now with swap evidence.\n"
-        "  - MARKET_SELL: signer target token balance decreased now and signer received a quote asset now with swap evidence.\n"
-        "  - LIMIT_BUY/SELL: known limit-order protocol with order-placement evidence and no immediate normal swap settlement.\n"
-        "  - CANCEL_LIMIT: cancel/withdraw/close of a prior limit order.\n"
-        "  - TRANSFER: token moved without swap/order evidence.\n"
-        "  - UNKNOWN: insufficient evidence.\n\n"
-        "Hard constraints:\n"
-        "  - If target_token_delta == 0, do NOT classify as MARKET_BUY or MARKET_SELL.\n"
-        "  - If has_cancel == true, strongly prefer CANCEL_LIMIT.\n"
-        "  - Do not rely on log words if balance changes contradict them.\n\n"
-        f"Transaction data:\n{json.dumps(summary, indent=2)}\n\n"
-        "Respond with ONLY valid JSON (no markdown, no extra text):\n"
-        '{"order_type":"<ONE>","confidence":<0.0-1.0>,'
-        '"reason":"<one sentence>","exchange":"<exchange name or Unknown>"}'
-    )
+    return f"""
+You are a strict Solana transaction classifier.
+
+Classify into exactly one:
+MARKET_BUY, MARKET_SELL, LIMIT_BUY, LIMIT_SELL, CANCEL_LIMIT, TRANSFER, UNKNOWN
+
+Decision rules:
+- MARKET_BUY:
+  target_token_delta > 0
+  AND signer paid another asset now
+  AND swap_like is true
+- MARKET_SELL:
+  target_token_delta < 0
+  AND signer received another asset now
+  AND swap_like is true
+- LIMIT_BUY:
+  limit_like or has_new_order
+  AND target_token_delta == 0
+  AND order placement evidence exists
+- LIMIT_SELL:
+  limit_like or has_new_order
+  AND target_token_delta <= 0
+  AND no normal immediate swap settlement
+- CANCEL_LIMIT:
+  has_cancel == true
+- TRANSFER:
+  target token moved
+  AND no swap_like
+  AND no limit_like
+- UNKNOWN:
+  anything ambiguous or contradictory
+
+Hard constraints:
+- If target_token_delta == 0, NEVER output MARKET_BUY or MARKET_SELL.
+- If has_cancel == true, prefer CANCEL_LIMIT unless facts strongly contradict it.
+- Do not invent fills from logs alone.
+- If facts are contradictory, output UNKNOWN.
+
+Facts:
+{json.dumps(facts, indent=2)}
+
+Return ONLY valid JSON:
+{{
+  "order_type": "MARKET_BUY|MARKET_SELL|LIMIT_BUY|LIMIT_SELL|CANCEL_LIMIT|TRANSFER|UNKNOWN",
+  "confidence": 0.0,
+  "reason": "one short sentence",
+  "exchange": "exchange name or Unknown"
+}}
+""".strip()
 
 
 LEARNED_PROGRAMS_FILE = os.getenv("LEARNED_PROGRAMS_FILE", "learned_programs.json")
@@ -1259,35 +1290,44 @@ class TransactionClassifier:
         return None
 
     def _learn(self, program_ids: set, order_type: OrderType,
-               exchange: str, confidence: float) -> None:
+            exchange: str, confidence: float) -> None:
         if confidence < 0.80:
             return
-        role = (
-            "limit" if order_type in (OrderType.LIMIT_BUY, OrderType.LIMIT_SELL, OrderType.CANCEL_LIMIT)
-            else "market"
-        )
+
+        if order_type in (OrderType.LIMIT_BUY, OrderType.LIMIT_SELL, OrderType.CANCEL_LIMIT):
+            role = "limit"
+        elif order_type in (OrderType.MARKET_BUY, OrderType.MARKET_SELL):
+            role = "market"
+        else:
+            # Never learn UNKNOWN or TRANSFER as an exchange role
+            return
+
         candidates = [
             pid for pid in program_ids
             if pid not in EXCHANGE_REGISTRY
             and pid not in SYSTEM_PROGRAMS
             and pid not in self._learned
         ]
+
         if len(candidates) > 1:
             print(f"   📚 Skipping learn: {len(candidates)} unknown programs, ambiguous which is {exchange}")
             return
+
         changed = False
         for pid in candidates:
             self._learned[pid] = {
-                "name":       exchange if exchange != "Unknown" else f"Learned ({pid[:8]}…)",
-                "role":       role,
+                "name": exchange if exchange != "Unknown" else f"Learned ({pid[:8]}…)",
+                "role": role,
                 "confidence": confidence,
-                "seen":       1,
+                "seen": 1,
             }
             print(f"   📚 Learned new program: {pid[:16]}… → {role} ({exchange})")
             changed = True
+
         for pid in program_ids:
             if pid in self._learned and pid not in candidates:
                 self._learned[pid]["seen"] = self._learned[pid].get("seen", 1) + 1
+
         if changed:
             _save_learned_programs(self._learned)
 
@@ -1365,18 +1405,61 @@ class TransactionClassifier:
             tx_data, signer, tx_data.get("signature", ""), suspicion, signals
         )
 
+        deltas = get_signer_token_deltas(tx_data, signer)
+        target_delta = deltas.get(MINT, 0.0)
+        program_ids = get_all_program_ids(tx_data)
+        logs_lc = " ".join(tx_data.get("meta", {}).get("logMessages") or []).lower()
+
+        looks_limitish = bool(program_ids & LIMIT_ORDER_PROGRAMS) or any(
+            k in logs_lc for k in ["limit", "order", "place order", "post only", "post-only", "cancel"]
+        )
+        looks_marketish = bool(program_ids & (ALL_SWAP_PROGRAMS | DEX_PROGRAMS))
+
+        # If zero target movement and no limit/cancel evidence, do not ask Groq
+        if abs(target_delta) < 1e-12 and not looks_limitish:
+            return OrderType.UNKNOWN, None
+
+        # If target moved but there is no market/limit evidence, Groq may still help
+        # so we allow it to continue
         if GROQ_ENABLED:
             order_type, info, conf = await self._groq_classify(tx_data, signer, ms, signals)
-            if order_type != OrderType.UNKNOWN and conf >= GROQ_MIN_CONFIDENCE:
-                program_ids = get_all_program_ids(tx_data)
-                self._learn(program_ids, order_type, info.get("exchange", "Unknown"), conf)
-                all_known        = ALL_KNOWN_PROGRAMS | set(self._learned.keys())
-                has_unknown_pids = bool(program_ids - all_known - SYSTEM_PROGRAMS)
-                if has_unknown_pids and order_type in (OrderType.LIMIT_BUY, OrderType.LIMIT_SELL):
-                    print(f"   ⚠️ Groq said {order_type.value} but program unconfirmed — skipping storage")
-                    return OrderType.UNKNOWN, None
-                return order_type, info
 
+            MIN_CONF_BY_TYPE = {
+                OrderType.MARKET_BUY: 0.75,
+                OrderType.MARKET_SELL: 0.75,
+                OrderType.LIMIT_BUY: 0.80,
+                OrderType.LIMIT_SELL: 0.80,
+                OrderType.CANCEL_LIMIT: 0.80,
+                OrderType.TRANSFER: 0.85,
+            }
+
+            min_conf = MIN_CONF_BY_TYPE.get(order_type, 0.99)
+
+        if order_type != OrderType.UNKNOWN and conf >= min_conf:
+            program_ids = get_all_program_ids(tx_data)
+            logs_lc = " ".join(tx_data.get("meta", {}).get("logMessages") or []).lower()
+
+            should_learn = False
+
+            if order_type in (OrderType.MARKET_BUY, OrderType.MARKET_SELL):
+                should_learn = bool(program_ids & (ALL_SWAP_PROGRAMS | DEX_PROGRAMS))
+
+            elif order_type in (OrderType.LIMIT_BUY, OrderType.LIMIT_SELL, OrderType.CANCEL_LIMIT):
+                should_learn = bool(program_ids & LIMIT_ORDER_PROGRAMS) or any(
+                    k in logs_lc for k in ["limit", "order", "cancel", "place order", "post only"]
+                )
+
+            if should_learn:
+                self._learn(program_ids, order_type, info.get("exchange", "Unknown"), conf)
+
+            all_known = ALL_KNOWN_PROGRAMS | set(self._learned.keys())
+            has_unknown_pids = bool(program_ids - all_known - SYSTEM_PROGRAMS)
+            if has_unknown_pids and order_type in (OrderType.LIMIT_BUY, OrderType.LIMIT_SELL):
+                print(f"   ⚠️ Groq said {order_type.value} but program unconfirmed — skipping storage")
+                return OrderType.UNKNOWN, None
+
+            return order_type, info
+        
         return OrderType.UNKNOWN, None
 
     def _rule_based(
@@ -1626,32 +1709,46 @@ class TransactionClassifier:
     ) -> Tuple[OrderType, Optional[Dict], float]:
         try:
             prompt = _build_classify_prompt(tx_data, signer, signals)
+
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
                     GROQ_URL,
-                    headers={"Authorization": f"Bearer {GROQ_API_KEY}",
-                             "Content-Type":  "application/json"},
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
                     json={
-                        "model":       GROQ_MODEL,
-                        "max_tokens":  256,
+                        "model": GROQ_MODEL,
+                        "max_tokens": 256,
                         "temperature": 0.0,
                         "messages": [
-                            {"role": "system",
-                             "content": "You are a Solana transaction classifier. Respond ONLY with valid JSON."},
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a strict Solana transaction classifier. "
+                                    "You must follow the provided hard constraints exactly. "
+                                    "When facts are insufficient or contradictory, return UNKNOWN. "
+                                    "Do not infer a fill, swap, or transfer if target-token movement does not support it. "
+                                    "Respond only with valid JSON."
+                                ),
+                            },
                             {"role": "user", "content": prompt},
                         ],
                     },
                 )
+
             if resp.status_code != 200:
                 print(f"   ⚡ Groq {resp.status_code}")
                 return OrderType.UNKNOWN, None, 0.0
 
-            raw        = resp.json()["choices"][0]["message"]["content"].strip()
-            parsed     = json.loads(raw.replace("```json", "").replace("```", "").strip())
-            ai_type    = parsed.get("order_type", "UNKNOWN").upper()
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            parsed = json.loads(raw.replace("```json", "").replace("```", "").strip())
+
+            ai_type = parsed.get("order_type", "UNKNOWN").upper()
             confidence = float(parsed.get("confidence", 0))
-            exchange   = parsed.get("exchange", "Unknown")
-            reason     = parsed.get("reason", "")
+            exchange = parsed.get("exchange", "Unknown")
+            reason = parsed.get("reason", "")
+
             print(f"   ⚡ Groq: {ai_type}  conf={confidence:.2f}  via {exchange}  — {reason}")
 
             try:
@@ -1660,18 +1757,131 @@ class TransactionClassifier:
                 return OrderType.UNKNOWN, None, 0.0
 
             token_result = self._parse_token_changes(tx_data, signer)
-            amount       = token_result[1] if token_result else 0.0
-            quote_token  = token_result[3] if token_result else ""
-            info: dict   = {
-                "wallet":      signer,
-                "amount":      amount,
-                "usd_value":   amount * ms.current_price,
-                "exchange":    exchange,
+            deltas = get_signer_token_deltas(tx_data, signer)
+            target_delta = deltas.get(MINT, 0.0)
+            program_ids = get_all_program_ids(tx_data)
+            all_ixs = get_all_instructions(tx_data)
+            logs_lc = " ".join(tx_data.get("meta", {}).get("logMessages") or []).lower()
+
+            # -----------------------------
+            # Hard validation rules
+            # -----------------------------
+            if order_type == OrderType.MARKET_BUY:
+                if target_delta <= 0 or not token_result or token_result[0] != "BUY":
+                    print("   ⚠️ Rejecting Groq MARKET_BUY: hard facts disagree")
+                    return OrderType.UNKNOWN, None, 0.0
+
+            if order_type == OrderType.MARKET_SELL:
+                if target_delta >= 0 or not token_result or token_result[0] != "SELL":
+                    print("   ⚠️ Rejecting Groq MARKET_SELL: hard facts disagree")
+                    return OrderType.UNKNOWN, None, 0.0
+
+            if order_type == OrderType.TRANSFER:
+                if abs(target_delta) < 1e-12 or not token_result or token_result[0] != "TRANSFER":
+                    print("   ⚠️ Rejecting Groq TRANSFER: no real transfer evidence")
+                    return OrderType.UNKNOWN, None, 0.0
+                if program_ids & (ALL_SWAP_PROGRAMS | DEX_PROGRAMS | LIMIT_ORDER_PROGRAMS):
+                    print("   ⚠️ Rejecting Groq TRANSFER: exchange program present")
+                    return OrderType.UNKNOWN, None, 0.0
+
+            if order_type == OrderType.CANCEL_LIMIT:
+                has_cancel = (
+                    "cancel" in logs_lc
+                    or "withdraw order" in logs_lc
+                    or "close order" in logs_lc
+                )
+                if not has_cancel:
+                    for ix in all_ixs:
+                        raw_ix = self._decode_ix_data(ix.get("data", ""))
+                        if raw_ix and len(raw_ix) >= 8 and DISCRIMINATORS.get(raw_ix[:8]) == "cancel_order":
+                            has_cancel = True
+                            break
+                if not has_cancel:
+                    print("   ⚠️ Rejecting Groq CANCEL_LIMIT: no cancel evidence")
+                    return OrderType.UNKNOWN, None, 0.0
+
+            if order_type in (OrderType.MARKET_BUY, OrderType.MARKET_SELL, OrderType.TRANSFER):
+                if not token_result or token_result[1] <= 0:
+                    print(f"   ⚠️ Rejecting Groq {order_type.value}: no real target-token movement")
+                    return OrderType.UNKNOWN, None, 0.0
+
+            # -----------------------------
+            # Build info payload
+            # -----------------------------
+            amount = token_result[1] if token_result else 0.0
+            quote_token = token_result[3] if token_result else ""
+
+            info: dict = {
+                "wallet": signer,
+                "amount": amount,
+                "usd_value": amount * ms.current_price,
+                "exchange": exchange,
                 "quote_token": quote_token or "",
             }
+
+            # -----------------------------
+            # Derive non-zero size for limit orders
+            # -----------------------------
             if order_type in (OrderType.LIMIT_BUY, OrderType.LIMIT_SELL):
-                tp = self._estimate_target_price(tx_data, amount, ms)
-                info["target_price"]   = tp
+                if amount <= 0:
+                    quote_candidates = []
+                    for mint, delta in deltas.items():
+                        if mint == MINT or abs(delta) < 1e-12:
+                            continue
+                        if delta < 0:
+                            quote_candidates.append((mint, abs(delta)))
+
+                    quote_mint = None
+                    if quote_candidates:
+                        preferred = [
+                            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+                            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+                            WSOL_MINT,
+                        ]
+                        for pref in preferred:
+                            for mint, _ in quote_candidates:
+                                if mint == pref:
+                                    quote_mint = mint
+                                    break
+                            if quote_mint:
+                                break
+                        if not quote_mint:
+                            quote_mint = max(quote_candidates, key=lambda x: x[1])[0]
+
+                    usd_value = 0.0
+                    if quote_mint in (
+                        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+                    ):
+                        usd_value = abs(deltas.get(quote_mint, 0.0))
+                    elif quote_mint == WSOL_MINT:
+                        usd_value = abs(deltas.get(quote_mint, 0.0)) * ms.sol_price_usd
+
+                    if usd_value <= 0:
+                        keys = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
+                        signer_idx = None
+                        for i, k in enumerate(keys):
+                            pub = k.get("pubkey") if isinstance(k, dict) else k
+                            if pub == signer:
+                                signer_idx = i
+                                break
+
+                        pre_b = tx_data.get("meta", {}).get("preBalances", [])
+                        post_b = tx_data.get("meta", {}).get("postBalances", [])
+                        if signer_idx is not None and signer_idx < len(pre_b) and signer_idx < len(post_b):
+                            sol_spent = max(0.0, (pre_b[signer_idx] - post_b[signer_idx]) / 1e9)
+                            usd_value = sol_spent * ms.sol_price_usd
+
+                    amount = usd_value / ms.current_price if usd_value > 0 and ms.current_price > 0 else 0.0
+                    info["amount"] = amount
+                    info["usd_value"] = usd_value
+
+                if info["amount"] <= 0 or info["usd_value"] <= 0:
+                    print(f"   ⚠️ Rejecting Groq {order_type.value}: could not derive non-zero order size")
+                    return OrderType.UNKNOWN, None, 0.0
+
+                tp = self._estimate_target_price(tx_data, info["amount"], ms)
+                info["target_price"] = tp
                 info["predicted_mcap"] = self._predict_mcap(tp, ms)
 
             return order_type, info, confidence
@@ -1679,13 +1889,6 @@ class TransactionClassifier:
         except Exception as e:
             print(f"   ⚡ Groq error: {e}")
             return OrderType.UNKNOWN, None, 0.0
-
-    def _has_cancel_instruction(self, instructions: list) -> bool:
-        for ix in instructions:
-            raw = self._decode_ix_data(ix.get("data", ""))
-            if raw and len(raw) >= 8 and DISCRIMINATORS.get(raw[:8]) == "cancel_order":
-                return True
-        return False
 
     @staticmethod
     def _decode_ix_data(data: str) -> Optional[bytes]:
@@ -2006,6 +2209,11 @@ class OrderTracker:
         order_type, info = await self.classifier.classify(tx_data, signer, self.ms)
         if not info:
             return None
+
+        if order_type in (OrderType.MARKET_BUY, OrderType.MARKET_SELL, OrderType.TRANSFER):
+            if info.get("amount", 0) <= 0 or info.get("usd_value", 0) <= 0:
+                print(f"   ⚠️ Ignoring {order_type.value}: zero-sized classification")
+                return None
         if order_type in (OrderType.LIMIT_BUY, OrderType.LIMIT_SELL):
             order = LimitOrder(
                 signature      = signature,
