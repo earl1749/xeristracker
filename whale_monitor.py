@@ -1,5 +1,6 @@
 import asyncio
 import json
+from unittest import signals
 import httpx
 import websockets
 import time
@@ -13,7 +14,11 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass
 from enum import Enum
-
+from typing import Dict, List, Optional, Tuple, Set, Any
+from collections import defaultdict
+from collections import defaultdict
+from typing import Set, Any
+import base64
 
 def load_env():
     env_path = Path(__file__).parent / ".env"
@@ -39,33 +44,38 @@ WSOL_MINT         = "So11111111111111111111111111111111111111112"
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 SPL_TOKEN_2022    = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 
-EXCHANGE_REGISTRY: Dict[str, Dict] = {
-    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": {"name": "Raydium AMM v4",          "role": "market"},
-    "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C": {"name": "Raydium CPMM",            "role": "market"},
-    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK": {"name": "Raydium CLMM",            "role": "hybrid"},
-    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1": {"name": "Raydium AMM v3",          "role": "market"},
-    "5tUmPnBDRpE8qFfSRQC6JrjkLcAH7GE7AvPFCYkFKhA":  {"name": "Raydium Limit Orders",    "role": "limit"},
-    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P":  {"name": "Pump.fun Bonding Curve",  "role": "market"},
-    "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA":  {"name": "Pump.fun AMM",            "role": "market"},
-    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4":  {"name": "Jupiter v6 (swaps)",      "role": "market"},
-    "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB":  {"name": "Jupiter v4 (swaps)",      "role": "market"},
-    "jupoNjAxXgZ4rjzxzPMP4oxduvQsQtZzyknqvzYNrNu":  {"name": "Jupiter Limit Orders",    "role": "limit"},
-    "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X":  {"name": "Jupiter Limit Orders v2", "role": "limit"},
-    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc":  {"name": "Orca Whirlpool",          "role": "market"},
-    "opnb2LAfJYbRMAHHvqjCwQxanZn7ReEHp1k81EohpZb":  {"name": "OpenBook v2",             "role": "limit"},
-    "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX":  {"name": "Serum DEX v3",            "role": "limit"},
-    "PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY":  {"name": "Phoenix DEX",             "role": "limit"},
-    "MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms":  {"name": "Manifest DEX",            "role": "limit"},
-    "DFLow1SsJbPgUgm68pBoM9UoiY5gD6DPPT4dGSJZmJN":  {"name": "DFlow Inflow",            "role": "limit"},
-    "FLow1atMoHtEnpNyFVUjPeUhCFkNh6MzHbQ8HLunB8e":  {"name": "DFlow Settlement",        "role": "limit"},
-    "proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u":  {"name": "OKX DEX Router",          "role": "market"},
-    "okxXo7ux3wEVmnnDLMijKv5HJtqUFYijFVhcjFJgBha":  {"name": "OKX DEX Router (alt)",    "role": "hybrid"},
-    "oKxLP9bUQdEBPqA3hKm7FRqrFtKREeMXqAVCZAkUFzL":  {"name": "OKX Limit Orders",        "role": "limit"},
-}
+def load_programs() -> Dict[str, Any]:
+    """Load program definitions from JSON file."""
+    try:
+        with open(PROGRAMS_FILE, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Could not load programs.json: {e}")
+        # Return minimal default set
+        return {
+            "known_programs": {},
+            "aggregator_programs": [],
+            "swap_programs": [],
+            "token_programs": [
+                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+            ]
+        }
 
-DEX_PROGRAMS: set         = {pid for pid, v in EXCHANGE_REGISTRY.items() if v["role"] in ("market", "hybrid")}
-LIMIT_ORDER_PROGRAMS: set = {pid for pid, v in EXCHANGE_REGISTRY.items() if v["role"] in ("limit",  "hybrid")}
-ALL_KNOWN_PROGRAMS: set   = set(EXCHANGE_REGISTRY.keys())
+# Load programs
+_PROGRAMS_CACHE = load_programs()
+
+# Build program sets
+EXCHANGE_REGISTRY: Dict[str, Dict] = _PROGRAMS_CACHE.get("known_programs", {})
+DEX_PROGRAMS: set = {pid for pid, v in EXCHANGE_REGISTRY.items() if v.get("role") in ("market", "hybrid")}
+LIMIT_ORDER_PROGRAMS: set = {pid for pid, v in EXCHANGE_REGISTRY.items() if v.get("role") in ("limit", "hybrid")}
+ALL_KNOWN_PROGRAMS: set = set(EXCHANGE_REGISTRY.keys())
+
+# Additional program sets for better classification
+AGGREGATOR_PROGRAMS: Set[str] = set(_PROGRAMS_CACHE.get("aggregator_programs", []))
+SWAP_PROGRAMS: Set[str] = set(_PROGRAMS_CACHE.get("swap_programs", []))
+ALL_SWAP_PROGRAMS: Set[str] = AGGREGATOR_PROGRAMS | SWAP_PROGRAMS
+TOKEN_PROGRAMS: Set[str] = set(_PROGRAMS_CACHE.get("token_programs", []))
 
 SYSTEM_PROGRAMS: set = {
     SPL_TOKEN_PROGRAM,
@@ -157,7 +167,7 @@ MINT            = os.getenv("MINT",         "9ezFthWrDUpSSeMdpLW6SDD9TJigHdc4AuQ
 DEV_WALLET      = os.getenv("DEV_WALLET",   "6XjutcUVEidzb3o1yXLYGC2ZSnjde2YvAUF9CiPVqxwm")
 WHALE_MIN_USD   = int(os.getenv("WHALE_MIN_USD", "1720"))
 DB_PATH         = os.getenv("DB_PATH",      "limit_orders.db")
-
+PROGRAMS_FILE = os.getenv("PROGRAMS_FILE", "programs.json")
 HELIUS_API_KEY  = os.getenv("HELIUS_API_KEY",  "")
 DISCORD_TOKEN   = os.getenv("DISCORD_TOKEN",   "")
 DISCORD_CHANNEL = os.getenv("DISCORD_CHANNEL", "")
@@ -524,8 +534,10 @@ class SuspicionScorer:
             if pre_sol[idx] - post_sol[idx] > 50_000 and self._token_delta(tx_data, signer) == 0:
                 total += 0.20; signals.append("sol_locked:no_fill")
 
-        if self._token_delta(tx_data, signer) == 0:
-            total += 0.15; signals.append("zero_token_delta")
+        analyzer = TokenFlowAnalyzer(MINT)
+        analysis = analyzer.analyze_transaction(tx_data, signer)
+        if not analysis["has_target_token_movement"] and not (set(analysis["programs_involved"]) & LIMIT_ORDER_PROGRAMS):
+            total += 0.10; signals.append("no_target_movement")
 
         accounts: set = set()
         for ix in ixs:
@@ -587,6 +599,410 @@ class SuspicionScorer:
         post_amt = sum(int((b.get("uiTokenAmount") or {}).get("amount") or "0") for b in post)
         return post_amt - pre_amt
 
+class TokenFlowAnalyzer:
+    """
+    Advanced token flow analyzer that handles any smart contract interaction,
+    including complex multi-hop swaps through any DEX or aggregator.
+    """
+    
+    def __init__(self, target_mint: str):
+        self.target_mint = target_mint
+        self.token_decimals: Dict[str, int] = {}
+        self.token_symbols: Dict[str, str] = KNOWN_TOKEN_LABELS.copy()
+        
+    def analyze_transaction(self, tx_data: Dict, user_wallet: str) -> Dict[str, Any]:
+        """
+        Comprehensive analysis of all token movements in a transaction.
+        Returns detailed flow information regardless of which contracts are involved.
+        """
+        meta = tx_data.get("meta", {})
+        message = tx_data.get("transaction", {}).get("message", {})
+        
+        # Collect all token movements
+        movements = self._collect_all_movements(tx_data, user_wallet)
+        
+        # Identify swap patterns
+        swap_info = self._identify_swap_patterns(movements, user_wallet)
+        
+        # Detect program involvement
+        programs_involved = self._get_programs_involved(tx_data)
+        
+        # Check if this is a swap-related transaction
+        is_swap_related = bool(programs_involved & ALL_SWAP_PROGRAMS) or swap_info["is_swap"]
+        
+        return {
+            "movements": movements,
+            "swap_info": swap_info,
+            "programs_involved": programs_involved,
+            "is_swap_related": is_swap_related,
+            "target_token_change": movements["by_mint"].get(self.target_mint, 0),
+            "has_target_token_movement": abs(movements["by_mint"].get(self.target_mint, 0)) > 0.000001,
+            "transaction_type": self._determine_transaction_type(movements, swap_info, programs_involved),
+        }
+    
+    def _collect_all_movements(self, tx_data: Dict, user_wallet: str) -> Dict[str, Any]:
+        """
+        Collect ALL token movements from every possible source:
+        - Direct balance changes
+        - Inner instruction transfers
+        - Program logs
+        - Account creations/closures
+        - CPI calls
+        """
+        meta = tx_data.get("meta", {})
+        
+        # 1. Get balance-based changes
+        balance_movements = self._get_balance_changes(tx_data, user_wallet)
+        
+        # 2. Get transfer-based movements from instructions
+        transfer_movements = self._get_transfer_movements(tx_data, user_wallet)
+        
+        # 3. Parse program logs for additional info
+        log_movements = self._parse_log_movements(tx_data, user_wallet)
+        
+        # 4. Check for account creations that might indicate new token accounts
+        
+        # Merge all movements
+        merged = defaultdict(float)
+        all_sources = [balance_movements, transfer_movements, log_movements]
+
+        
+        for source in all_sources:
+            for mint, delta in source.items():
+                if abs(delta) > 0.000001:  # Ignore tiny dust movements
+                    merged[mint] += delta
+        
+        # Convert to dict and add metadata
+        result = {
+            "by_mint": dict(merged),
+            "total_in": 0.0,
+            "total_out": 0.0,
+            "net": 0.0,
+            "source_breakdown": {
+                "balance_changes": balance_movements,
+                "transfers": transfer_movements,
+                "logs": log_movements,
+            }
+        }
+        
+        # Calculate totals
+        for mint, delta in merged.items():
+            if delta > 0:
+                result["total_in"] += delta
+            else:
+                result["total_out"] += abs(delta)
+        
+        result["net"] = result["total_in"] - result["total_out"]
+        return result
+    
+    def _get_balance_changes(self, tx_data: Dict, user_wallet: str) -> Dict[str, float]:
+        """Get token movements from pre/post balance changes."""
+        meta = tx_data.get("meta", {})
+        pre_all = meta.get("preTokenBalances", []) or []
+        post_all = meta.get("postTokenBalances", []) or []
+        
+        # Index balances by account
+        pre_by_account = {}
+        post_by_account = {}    
+        
+        for bal in pre_all:
+            if bal.get("owner") == user_wallet:
+                idx = bal.get("accountIndex")
+                mint = bal.get("mint")
+                amount = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
+                decimals = (bal.get("uiTokenAmount") or {}).get("decimals", 6)
+                self.token_decimals[mint] = decimals
+                pre_by_account[idx] = {"mint": mint, "amount": amount}
+                if idx is None or not mint:
+                    continue
+        for bal in post_all:
+            if bal.get("owner") == user_wallet:
+                idx = bal.get("accountIndex")
+                mint = bal.get("mint")
+                amount = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
+                decimals = (bal.get("uiTokenAmount") or {}).get("decimals", 6)
+                self.token_decimals[mint] = decimals
+                post_by_account[idx] = {"mint": mint, "amount": amount}
+        
+        # Calculate changes
+        changes = defaultdict(float)
+        all_accounts = set(pre_by_account.keys()) | set(post_by_account.keys())
+        
+        for idx in all_accounts:
+            pre = pre_by_account.get(idx)
+            post = post_by_account.get(idx)
+            
+            if pre and post:
+                if pre["mint"] == post["mint"]:
+                    delta = post["amount"] - pre["amount"]
+                    if delta != 0:
+                        decimals = self.token_decimals.get(pre["mint"], 6)
+                        changes[pre["mint"]] += delta / (10 ** decimals)
+            elif post:
+                # New account
+                decimals = self.token_decimals.get(post["mint"], 6)
+                changes[post["mint"]] += post["amount"] / (10 ** decimals)
+            elif pre:
+                # Account closed
+                decimals = self.token_decimals.get(pre["mint"], 6)
+                changes[pre["mint"]] -= pre["amount"] / (10 ** decimals)
+        
+        return dict(changes)
+    
+    def _get_transfer_movements(self, tx_data: Dict, user_wallet: str) -> Dict[str, float]:
+        """Extract token movements from all instruction transfers (inner and outer)."""
+        meta = tx_data.get("meta", {})
+        message = tx_data.get("transaction", {}).get("message", {})
+        movements = defaultdict(float)
+        
+        # Check all instructions (outer)
+        for ix in message.get("instructions", []):
+            self._process_instruction_for_transfers(ix, user_wallet, movements, tx_data)
+        
+        # Check inner instructions
+        for inner_group in meta.get("innerInstructions", []) or []:
+            for ix in inner_group.get("instructions", []):
+                self._process_instruction_for_transfers(ix, user_wallet, movements, tx_data)
+        
+        return dict(movements)
+    
+    def _process_instruction_for_transfers(self, ix: Dict, user_wallet: str, 
+                                           movements: Dict[str, float], tx_data: Dict):
+        """Process a single instruction for token transfers."""
+        program_id = ix.get("programId")
+        
+        # Check all known token programs
+        if program_id in TOKEN_PROGRAMS:
+            transfer_info = self._decode_token_transfer(ix, tx_data)
+            if transfer_info:
+                mint = transfer_info.get("mint")
+                amount = transfer_info.get("amount", 0)
+                source = transfer_info.get("source")
+                dest = transfer_info.get("destination")
+                
+                decimals = self.token_decimals.get(mint, 6)
+                decimal_amount = amount / (10 ** decimals)
+                
+                if source == user_wallet:
+                    movements[mint] -= decimal_amount
+                elif dest == user_wallet:
+                    movements[mint] += decimal_amount
+        
+        # Check for swap program logs that indicate token amounts
+        elif program_id in SWAP_PROGRAMS:
+            # Many DEXes emit swap amounts in logs
+            self._extract_swap_amounts_from_logs(ix, user_wallet, movements, tx_data)
+    
+    def _decode_token_transfer(self, ix: Dict, tx_data: Dict) -> Optional[Dict]:
+        """Decode a token transfer instruction."""
+        data = ix.get("data", "")
+        accounts = ix.get("accounts", [])
+        
+        if not data or not accounts:
+            return None
+        
+        try:
+            _B58 = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+            _MAP = {c: i for i, c in enumerate(_B58)}
+            n = 0
+            for ch in data.encode():
+                if ch not in _MAP:
+                    raise ValueError()
+                n = n * 58 + _MAP[ch]
+            pad = len(data) - len(data.lstrip("1"))
+            raw = b"\x00" * pad + n.to_bytes((n.bit_length() + 7) // 8 or 1, "big")
+        except Exception:
+            raw = base64.b64decode(data + "==")
+            if len(raw) >= 1:
+                discriminator = raw[0]
+                
+
+                if discriminator == 3 and len(accounts) >= 2:
+                    amount = int.from_bytes(raw[1:9], "little")
+                    return {
+                        "type": "transfer",
+                        "amount": amount,
+                        "source": accounts[0] if len(accounts) > 0 else None,
+                        "destination": accounts[1] if len(accounts) > 1 else None,
+                        "mint": self._get_mint_for_account(accounts[0], tx_data)
+                    }
+                elif discriminator == 4 and len(accounts) >= 3:
+                    amount = int.from_bytes(raw[1:9], "little")
+                    return {
+                        "type": "transfer_checked",
+                        "amount": amount,
+                        "source": accounts[0] if len(accounts) > 0 else None,
+                        "destination": accounts[1] if len(accounts) > 1 else None,
+                        "mint": accounts[2] if len(accounts) > 2 else None,
+                    }
+        except Exception:
+            pass
+        
+        return None
+    
+    def _get_mint_for_account(self, account: str, tx_data: Dict) -> Optional[str]:
+        meta = tx_data.get("meta", {})
+        keys = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
+        key_list = [k.get("pubkey") if isinstance(k, dict) else k for k in keys]
+        try:
+            idx = key_list.index(account)
+        except ValueError:
+            return None
+        for bal in (meta.get("preTokenBalances") or []) + (meta.get("postTokenBalances") or []):
+            if bal.get("accountIndex") == idx:
+                return bal.get("mint")
+        return None
+    
+    def _parse_log_movements(self, tx_data: Dict, user_wallet: str) -> Dict[str, float]:
+        """Parse program logs for token movement information."""
+        meta = tx_data.get("meta", {})
+        logs = meta.get("logMessages", []) or []
+        movements = defaultdict(float)
+        
+        for log in logs:
+            # Many DEXes log swap amounts
+            if "swap" in log.lower() or "exchange" in log.lower():
+                # Try to extract amounts
+                import re
+                
+                # Look for patterns like "amount_in: 1000" or "amount_out: 500"
+                in_match = re.search(r'(?:amount_in|in_amount|input).*?(\d+)', log, re.IGNORECASE)
+                out_match = re.search(r'(?:amount_out|out_amount|output).*?(\d+)', log, re.IGNORECASE)
+                
+                # Look for token mints in logs
+                mint_match = re.search(r'[1-9A-HJ-NP-Za-km-z]{32,44}', log)
+                
+                if mint_match and (in_match or out_match):
+                    mint = mint_match.group()
+                    if in_match:
+                        amount = float(in_match.group(1)) / (10 ** self.token_decimals.get(mint, 6))
+                        # Can't determine direction without more context
+                    if out_match:
+                        amount = float(out_match.group(1)) / (10 ** self.token_decimals.get(mint, 6))
+        
+        return dict(movements)
+    
+    def _detect_account_creations(self, tx_data: Dict, user_wallet: str) -> Dict[str, float]:
+        """Detect new token accounts created for the user."""
+        meta = tx_data.get("meta", {})
+        pre_accounts = {b.get("accountIndex") for b in (meta.get("preTokenBalances") or []) 
+                       if b.get("owner") == user_wallet}
+        post_accounts = {b.get("accountIndex") for b in (meta.get("postTokenBalances") or [])
+                        if b.get("owner") == user_wallet}
+        
+        new_accounts = post_accounts - pre_accounts
+        movements = defaultdict(float)
+        
+        for acc_idx in new_accounts:
+            for bal in meta.get("postTokenBalances") or []:
+                if bal.get("accountIndex") == acc_idx and bal.get("owner") == user_wallet:
+                    mint = bal.get("mint")
+                    amount = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
+                    decimals = self.token_decimals.get(mint, 6)
+                    movements[mint] += amount / (10 ** decimals)
+        
+        return dict(movements)
+    
+    def _get_programs_involved(self, tx_data: Dict) -> Set[str]:
+        """Get all programs involved in the transaction (outer + inner)."""
+        message = tx_data.get("transaction", {}).get("message", {})
+        meta = tx_data.get("meta", {})
+        programs = set()
+        
+        # Outer instructions
+        for ix in message.get("instructions", []):
+            pid = ix.get("programId")
+            if pid:
+                programs.add(pid)
+        
+        # Inner instructions
+        for inner_group in meta.get("innerInstructions", []) or []:
+            for ix in inner_group.get("instructions", []):
+                pid = ix.get("programId")
+                if pid:
+                    programs.add(pid)
+        
+        return programs
+    
+    def _identify_swap_patterns(self, movements: Dict, user_wallet: str) -> Dict[str, Any]:
+        """
+        Identify if the movements match a swap pattern:
+        - One token decreases, another increases
+        - Net token change close to zero (swapping one for another)
+        - Multiple tokens might be involved in multi-hop swaps
+        """
+        by_mint = movements["by_mint"]
+        
+        # A swap typically has at least one positive and one negative movement
+        positive_mints = [m for m, delta in by_mint.items() if delta > 0.000001]
+        negative_mints = [m for m, delta in by_mint.items() if delta < -0.000001]
+        
+        is_swap = len(positive_mints) >= 1 and len(negative_mints) >= 1
+        
+        # Check net change (should be close to zero for pure swaps)
+        net_change = movements["net"]
+        is_pure_swap = is_swap and abs(net_change) < 0.000001
+        
+        # Identify the main token being swapped
+        main_in_token = None
+        main_out_token = None
+        main_in_amount = 0
+        main_out_amount = 0
+        
+        if positive_mints:
+            main_in_token = max(positive_mints, key=lambda m: by_mint[m])
+            main_in_amount = by_mint[main_in_token]
+        
+        if negative_mints:
+            main_out_token = min(negative_mints, key=lambda m: by_mint[m])
+            main_out_amount = abs(by_mint[main_out_token])
+        
+        return {
+            "is_swap": is_swap,
+            "is_pure_swap": is_pure_swap,
+            "positive_mints": positive_mints,
+            "negative_mints": negative_mints,
+            "main_in_token": main_in_token,
+            "main_out_token": main_out_token,
+            "main_in_amount": main_in_amount,
+            "main_out_amount": main_out_amount,
+            "estimated_price": main_out_amount / main_in_amount if main_in_amount > 0 else 0,
+        }
+    
+    def _determine_transaction_type(self, movements: Dict, swap_info: Dict, 
+                                     programs_involved: Set[str]) -> str:
+        """Determine the overall transaction type."""
+        target_change = movements["by_mint"].get(self.target_mint, 0)
+        
+        # Check for limit orders first
+        if programs_involved & LIMIT_ORDER_PROGRAMS:
+            if abs(target_change) < 0.000001:
+                return "LIMIT_PLACEMENT"
+            else:
+                return "LIMIT_FILL"
+        
+        # Check for swaps
+        if swap_info["is_swap"]:
+            if target_change > 0:
+                return "MARKET_BUY"
+            elif target_change < 0:
+                return "MARKET_SELL"
+        
+        # Check for transfers
+        if len(movements["by_mint"]) == 1 and self.target_mint in movements["by_mint"]:
+            return "TRANSFER"
+        
+        # Check for cancellations
+        if "cancel" in str(programs_involved).lower():
+            return "CANCEL_LIMIT"
+        
+        return "UNKNOWN"
+    
+    def _extract_swap_amounts_from_logs(self, ix: Dict, user_wallet: str, 
+                                        movements: Dict[str, float], tx_data: Dict):
+        """Extract swap amounts from program logs."""
+        # This is a placeholder - actual implementation would parse specific DEX logs
+        pass
 
 def _build_classify_prompt(tx_data: Dict, signer: str, suspicion_signals: List[str]) -> str:
     meta     = tx_data.get("meta", {})
@@ -697,6 +1113,10 @@ class TransactionClassifier:
         self, tx_data: Dict, signer: str, signature: str,
         suspicion: float, signals: List[str]
     ) -> None:
+        analyzer = TokenFlowAnalyzer(MINT)
+        analysis = analyzer.analyze_transaction(tx_data, signer)
+        if analysis["has_target_token_movement"]:
+           print(f"   ✅ Unknown program transaction shows token movement - will process")
         message = tx_data.get("transaction", {}).get("message", {})
         ixs     = message.get("instructions", [])
         meta    = tx_data.get("meta", {})
@@ -964,53 +1384,60 @@ class TransactionClassifier:
 
     def _parse_token_changes(
         self, tx_data: Dict, signer: str
-    ) -> Optional[Tuple[str, float, str, str]]:
-        meta     = tx_data.get("meta", {})
-        pre_all  = meta.get("preTokenBalances",  []) or []
-        post_all = meta.get("postTokenBalances", []) or []
-        pre      = [b for b in pre_all  if b.get("mint") == MINT]
-        post     = [b for b in post_all if b.get("mint") == MINT]
-
-        if not pre and not post:
+        ) -> Optional[Tuple[str, float, str, str]]:
+        """
+        Universal token change parser that works with ANY smart contract.
+        """
+        analyzer = TokenFlowAnalyzer(MINT)
+        analysis = analyzer.analyze_transaction(tx_data, signer)
+        
+        # If no target token movement, not relevant
+        if not analysis["has_target_token_movement"]:
             return None
-
-        signer_delta = 0
-        for p in post:
-            if p.get("owner") == signer:
-                amt_post = int((p.get("uiTokenAmount") or {}).get("amount") or "0")
-                match    = next(
-                    (x for x in pre if x.get("accountIndex") == p.get("accountIndex")), None
-                )
-                amt_pre  = int((match.get("uiTokenAmount") or {}).get("amount") or "0") if match else 0
-                signer_delta += amt_post - amt_pre
-
-        for p in pre:
-            if p.get("owner") == signer:
-                already = any(x.get("accountIndex") == p.get("accountIndex") for x in post)
-                if not already:
-                    amt_pre = int((p.get("uiTokenAmount") or {}).get("amount") or "0")
-                    signer_delta -= amt_pre
-
-        if signer_delta == 0:
+        
+        target_change = analysis["target_token_change"]
+        swap_info = analysis["swap_info"]
+        programs = analysis["programs_involved"]
+        tx_type = analysis["transaction_type"]
+        
+        # Handle different transaction types
+        if tx_type == "TRANSFER":
+            # Find recipient
+            meta = tx_data.get("meta", {})
+            receiver = "unknown"
+            for bal in meta.get("postTokenBalances", []) or []:
+                if bal.get("mint") == MINT and bal.get("owner") != signer:
+                    receiver = bal.get("owner")
+                    break
+            return ("TRANSFER", abs(target_change), signer, receiver)
+        
+        elif tx_type in ["MARKET_BUY", "MARKET_SELL"]:
+            # Find the quote token (the other main token in the swap)
+            quote_token = None
+            if swap_info["main_in_token"] and swap_info["main_in_token"] != MINT:
+                quote_token = swap_info["main_in_token"]
+            elif swap_info["main_out_token"] and swap_info["main_out_token"] != MINT:
+                quote_token = swap_info["main_out_token"]
+            
+            quote_symbol = KNOWN_TOKEN_LABELS.get(quote_token, quote_token[:8] + "…" if quote_token else "SOL")
+            
+            if target_change > 0:
+                return ("BUY", target_change, signer, quote_symbol)
+            else:
+                return ("SELL", abs(target_change), signer, quote_symbol)
+        
+        elif tx_type == "LIMIT_PLACEMENT":
+            # This is a limit order placement - should be handled separately
             return None
-
-        amount      = abs(signer_delta) / 1_000_000
-        quote_label = self._get_quote_token(pre_all, post_all, tx_data)
-
-        if self._is_transfer(tx_data, signer):
-            pre_map  = {b["owner"]: int((b.get("uiTokenAmount") or {}).get("amount") or "0")
-                        for b in pre  if "owner" in b}
-            post_map = {b["owner"]: int((b.get("uiTokenAmount") or {}).get("amount") or "0")
-                        for b in post if "owner" in b}
-            receiver = next(
-                (o for o in (set(post_map) | set(pre_map))
-                 if o != signer and o not in DEX_PROGRAMS | LIMIT_ORDER_PROGRAMS
-                 and post_map.get(o, 0) - pre_map.get(o, 0) > 0),
-                "unknown",
-            )
-            return "TRANSFER", amount, signer, receiver
-
-        return ("BUY" if signer_delta > 0 else "SELL"), amount, signer, quote_label
+        
+        elif tx_type == "LIMIT_FILL":
+            # This is a limit order being filled
+            if target_change > 0:
+                return ("BUY", target_change, signer, "LIMIT")
+            else:
+                return ("SELL", abs(target_change), signer, "LIMIT")
+        
+        return None
 
     @staticmethod
     def _get_quote_token(pre_all: List[Dict], post_all: List[Dict],
