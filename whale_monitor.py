@@ -39,6 +39,7 @@ def load_env():
 
 load_env()
 
+PROGRAMS_FILE = os.getenv("PROGRAMS_FILE", "programs.json")
 
 WSOL_MINT         = "So11111111111111111111111111111111111111112"
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -167,7 +168,6 @@ MINT            = os.getenv("MINT",         "9ezFthWrDUpSSeMdpLW6SDD9TJigHdc4AuQ
 DEV_WALLET      = os.getenv("DEV_WALLET",   "6XjutcUVEidzb3o1yXLYGC2ZSnjde2YvAUF9CiPVqxwm")
 WHALE_MIN_USD   = int(os.getenv("WHALE_MIN_USD", "1720"))
 DB_PATH         = os.getenv("DB_PATH",      "limit_orders.db")
-PROGRAMS_FILE = os.getenv("PROGRAMS_FILE", "programs.json")
 HELIUS_API_KEY  = os.getenv("HELIUS_API_KEY",  "")
 DISCORD_TOKEN   = os.getenv("DISCORD_TOKEN",   "")
 DISCORD_CHANNEL = os.getenv("DISCORD_CHANNEL", "")
@@ -531,7 +531,10 @@ class SuspicionScorer:
         post_sol = meta.get("postBalances", [])
         idx = self._signer_index(tx_data, signer)
         if idx is not None and idx < len(pre_sol) and idx < len(post_sol):
-            if pre_sol[idx] - post_sol[idx] > 50_000 and self._token_delta(tx_data, signer) == 0:
+            prog_ids = {ix.get("programId") for ix in ixs if ix.get("programId")}
+            if (pre_sol[idx] - post_sol[idx] > 50_000
+                    and self._token_delta(tx_data, signer) == 0
+                    and not (prog_ids & DEX_PROGRAMS)):
                 total += 0.20; signals.append("sol_locked:no_fill")
 
         analyzer = TokenFlowAnalyzer(MINT)
@@ -706,15 +709,17 @@ class TokenFlowAnalyzer:
         post_by_account = {}    
         
         for bal in pre_all:
-            if bal.get("owner") == user_wallet:
-                idx = bal.get("accountIndex")
-                mint = bal.get("mint")
-                amount = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
-                decimals = (bal.get("uiTokenAmount") or {}).get("decimals", 6)
-                self.token_decimals[mint] = decimals
-                pre_by_account[idx] = {"mint": mint, "amount": amount}
-                if idx is None or not mint:
-                    continue
+            if bal.get("owner") != user_wallet:
+                continue
+            idx  = bal.get("accountIndex")
+            mint = bal.get("mint")
+            if idx is None or not mint:
+                continue
+            amount   = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
+            decimals = (bal.get("uiTokenAmount") or {}).get("decimals", 6)
+            self.token_decimals[mint] = decimals
+            pre_by_account[idx] = {"mint": mint, "amount": amount}
+
         for bal in post_all:
             if bal.get("owner") == user_wallet:
                 idx = bal.get("accountIndex")
@@ -794,13 +799,12 @@ class TokenFlowAnalyzer:
             self._extract_swap_amounts_from_logs(ix, user_wallet, movements, tx_data)
     
     def _decode_token_transfer(self, ix: Dict, tx_data: Dict) -> Optional[Dict]:
-        """Decode a token transfer instruction."""
         data = ix.get("data", "")
         accounts = ix.get("accounts", [])
-        
         if not data or not accounts:
             return None
-        
+
+        raw = None
         try:
             _B58 = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
             _MAP = {c: i for i, c in enumerate(_B58)}
@@ -812,34 +816,36 @@ class TokenFlowAnalyzer:
             pad = len(data) - len(data.lstrip("1"))
             raw = b"\x00" * pad + n.to_bytes((n.bit_length() + 7) // 8 or 1, "big")
         except Exception:
-            raw = base64.b64decode(data + "==")
-            if len(raw) >= 1:
-                discriminator = raw[0]
-                
+            try:
+                raw = base64.b64decode(data + "==")
+            except Exception:
+                return None
 
-                if discriminator == 3 and len(accounts) >= 2:
-                    amount = int.from_bytes(raw[1:9], "little")
-                    return {
-                        "type": "transfer",
-                        "amount": amount,
-                        "source": accounts[0] if len(accounts) > 0 else None,
-                        "destination": accounts[1] if len(accounts) > 1 else None,
-                        "mint": self._get_mint_for_account(accounts[0], tx_data)
-                    }
-                elif discriminator == 4 and len(accounts) >= 3:
-                    amount = int.from_bytes(raw[1:9], "little")
-                    return {
-                        "type": "transfer_checked",
-                        "amount": amount,
-                        "source": accounts[0] if len(accounts) > 0 else None,
-                        "destination": accounts[1] if len(accounts) > 1 else None,
-                        "mint": accounts[2] if len(accounts) > 2 else None,
-                    }
-        except Exception:
-            pass
-        
+        if not raw or len(raw) < 9:
+            return None
+
+        discriminator = raw[0]
+
+        if discriminator == 3 and len(accounts) >= 2:
+            return {
+                "type": "transfer",
+                "amount": int.from_bytes(raw[1:9], "little"),
+                "source": accounts[0],
+                "destination": accounts[1],
+                "mint": self._get_mint_for_account(accounts[0], tx_data),
+            }
+
+        if discriminator == 12 and len(accounts) >= 4:  # TransferChecked, NOT 4
+            return {
+                "type": "transfer_checked",
+                "amount": int.from_bytes(raw[1:9], "little"),
+                "source": accounts[0],
+                "destination": accounts[2],  # layout: [src, mint, dst, authority]
+                "mint": accounts[1],
+            }
+
         return None
-    
+
     def _get_mint_for_account(self, account: str, tx_data: Dict) -> Optional[str]:
         meta = tx_data.get("meta", {})
         keys = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
@@ -1214,9 +1220,50 @@ class TransactionClassifier:
         learned_limit_hits = {p for p in program_ids if self._known_role(p) in ("limit", "hybrid")}
         limit_hits         = program_ids & LIMIT_ORDER_PROGRAMS | learned_limit_hits
         has_cancel         = self._has_cancel_instruction(ixs)
-        token_result       = self._parse_token_changes(tx_data, signer)
+
+        # Handle cancel BEFORE needing token_result
+        if limit_hits and has_cancel:
+            return OrderType.CANCEL_LIMIT, {
+                "wallet":      signer,
+                "signature":   tx_data.get("signature", ""),
+                "exchange":    ", ".join(
+                    exchange_name(p) if p in EXCHANGE_REGISTRY
+                    else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
+                    for p in limit_hits
+                ),
+                "quote_token": "",
+            }
+
+        token_result = self._parse_token_changes(tx_data, signer)
 
         if not token_result:
+            # Could still be a limit placement from a known program
+            if limit_hits:
+                meta   = tx_data.get("meta", {})
+                pre_b  = meta.get("preBalances", [])
+                post_b = meta.get("postBalances", [])
+                sol_locked = max(
+                    (abs(post_b[i] - pre_b[i]) for i in range(min(len(pre_b), len(post_b)))),
+                    default=0,
+                ) / 1e9
+                usd_val = sol_locked * ms.sol_price_usd
+                if usd_val > 0:
+                    tp    = ms.current_price
+                    pmc   = self._predict_mcap(tp, ms)
+                    names = [
+                        exchange_name(p) if p in EXCHANGE_REGISTRY
+                        else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
+                        for p in limit_hits
+                    ]
+                    return OrderType.LIMIT_BUY, {
+                        "wallet":         signer,
+                        "amount":         0,
+                        "usd_value":      usd_val,
+                        "target_price":   tp,
+                        "predicted_mcap": pmc,
+                        "exchange":       ", ".join(names),
+                        "quote_token":    "",
+                    }
             return OrderType.UNKNOWN, None
 
         tx_type, amount, wallet, quote_token = token_result
@@ -1230,27 +1277,19 @@ class TransactionClassifier:
                 "quote_token": "",
             }
 
-        if limit_hits and has_cancel:
-            return OrderType.CANCEL_LIMIT, {
-                "wallet":      signer,
-                "signature":   tx_data.get("signature", ""),
-                "exchange":    ", ".join(
-                    exchange_name(p) if p in EXCHANGE_REGISTRY
-                    else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
-                    for p in limit_hits
-                ),
-                "quote_token": "",
-            }
-
         usd_value = amount * ms.current_price
 
         hybrid_hits = {
             p for p in program_ids
             if EXCHANGE_REGISTRY.get(p, {}).get("role") == "hybrid"
-               or self._learned.get(p, {}).get("role") == "hybrid"
+            or self._learned.get(p, {}).get("role") == "hybrid"
         }
-        if hybrid_hits and self._scorer._token_delta(tx_data, signer) == 0:
-            limit_hits |= hybrid_hits
+        # Bug 6 fix — use analyzer instead of _token_delta
+        if hybrid_hits:
+            analyzer = TokenFlowAnalyzer(MINT)
+            analysis = analyzer.analyze_transaction(tx_data, signer)
+            if not analysis["has_target_token_movement"]:
+                limit_hits |= hybrid_hits
 
         if limit_hits:
             if amount <= 0 or usd_value <= 0:
@@ -1280,7 +1319,7 @@ class TransactionClassifier:
         if program_ids & all_known:
             pid_hit = next(iter(program_ids & all_known), "")
             ex = (exchange_name(pid_hit) if pid_hit in EXCHANGE_REGISTRY
-                  else self._learned.get(pid_hit, {}).get("name", f"Learned ({pid_hit[:8]}…)"))
+                else self._learned.get(pid_hit, {}).get("name", f"Learned ({pid_hit[:8]}…)"))
             info = {
                 "wallet":      wallet,
                 "amount":      amount,
@@ -1573,8 +1612,7 @@ class TransactionClassifier:
                             return c
                     except (ValueError, IndexError):
                         pass
-        tr = self._parse_token_changes(tx_data, "")
-        return ms.current_price * (0.97 if (tr and tr[0] == "BUY") else 1.03)
+        return ms.current_price * 0.97
 
     @staticmethod
     def _price_is_sane(price: float, ms: MarketState) -> bool:
