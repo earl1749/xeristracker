@@ -708,7 +708,7 @@ class TokenFlowAnalyzer:
         pre_by_account = {}
         post_by_account = {}    
         
-        for bal in pre_all:
+        for bal in post_all:
             if bal.get("owner") != user_wallet:
                 continue
             idx  = bal.get("accountIndex")
@@ -718,7 +718,7 @@ class TokenFlowAnalyzer:
             amount   = int((bal.get("uiTokenAmount") or {}).get("amount") or "0")
             decimals = (bal.get("uiTokenAmount") or {}).get("decimals", 6)
             self.token_decimals[mint] = decimals
-            pre_by_account[idx] = {"mint": mint, "amount": amount}
+            post_by_account[idx] = {"mint": mint, "amount": amount}
 
         for bal in post_all:
             if bal.get("owner") == user_wallet:
