@@ -110,7 +110,7 @@
     },
     "proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u": {
       "name": "OKX DEX Router",
-      "role": "market",
+      "role": "hybrid",
       "type": "aggregator",
       "platform": "okx"
     },
