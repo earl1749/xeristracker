@@ -4,3 +4,5 @@ websockets
 matplotlib
 mplfinance
 aiohttp
+matplotlib
+numpy
