@@ -1,6 +1,5 @@
 import asyncio
 import json
-from unittest import signals
 import httpx
 import websockets
 import time
