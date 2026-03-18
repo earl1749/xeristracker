@@ -3201,15 +3201,6 @@ async def cmd_whale(channel_id: int, ca: str) -> None:
         "timestamp": get_timestamp(),
     }])
 
-TIMEFRAME_MAP = {
-    "1m":  1,
-    "5m":  5,
-    "15m": 15,
-    "1h":  60,
-    "1d":  1440,
-    "1D":  1440,
-}
-
 async def fetch_geckoterminal(ca: str) -> dict:
     try:
         url = f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{ca}/pools"
@@ -3241,49 +3232,6 @@ async def fetch_geckoterminal(ca: str) -> dict:
     except Exception as e:
         print(f"❌ GeckoTerminal error: {e}")
         return {}
-
-
-    = ((last_close - first_close) / first_close * 100) if first_close > 0 else 0
-        pct_color   = GREEN if pct_change >= 0 else RED
-        pct_sign    = "+" if pct_change >= 0 else ""
-
-        fig.text(
-            0.01, 0.97,
-            f"{token_name}   ${last_close:.8f}",
-            color=TEXT, fontsize=13, fontweight="bold",
-            va="top", ha="left",
-        )
-        fig.text(
-            0.01, 0.91,
-            f"{pct_sign}{pct_change:.2f}%  ·  {tf_label}  ·  {n} candles",
-            color=pct_color, fontsize=9,
-            va="top", ha="left",
-        )
-        fig.text(
-            0.99, 0.97,
-            "GeckoTerminal",
-            color=SUBTEXT, fontsize=8,
-            va="top", ha="right",
-        )
-
-        # ── Limits ──────────────────────────────────────────────────────────
-        ax_candle.set_xlim(-0.5, n - 0.5)
-        ax_vol.set_xlim(-0.5, n - 0.5)
-        price_pad = (max(highs) - min(lows)) * 0.05
-        ax_candle.set_ylim(min(lows) - price_pad, max(highs) + price_pad)
-
-        plt.tight_layout(rect=[0, 0, 1, 0.93])
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=130, bbox_inches="tight",
-                    facecolor=BG, edgecolor="none")
-        plt.close(fig)
-        buf.seek(0)
-        return buf.read()
-
-    except Exception as e:
-        print(f"❌ Chart render error: {e}")
-        return None
 
 TIMEFRAME_MAP = {
     "1m":  {"birdeye": "1m",  "label": "1M",  "resolution": 1},
