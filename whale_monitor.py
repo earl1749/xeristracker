@@ -3199,217 +3199,15 @@ async def cmd_whale(channel_id: int, ca: str) -> None:
         "timestamp": get_timestamp(),
     }])
 
-    
-    TIMEFRAME_MAP = {
+TIMEFRAME_MAP = {
     "1m":  {"birdeye": "1m",  "label": "1M",  "resolution": 1},
     "5m":  {"birdeye": "5m",  "label": "5M",  "resolution": 5},
     "15m": {"birdeye": "15m", "label": "15M", "resolution": 15},
     "1h":  {"birdeye": "1H",  "label": "1H",  "resolution": 60},
     "1d":  {"birdeye": "1D",  "label": "1D",  "resolution": 1440},
-    }
-
-async def fetch_geckoterminal(ca: str) -> dict:
-    try:
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{ca}/pools"
-        headers = {"Accept": "application/json;version=20230302"}
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(url, headers=headers)
-            if r.status_code != 200:
-                return {}
-            data = r.json()
-        pools = data.get("data", [])
-        if not pools:
-            return {}
-        best  = pools[0]
-        attrs = best.get("attributes", {})
-        return {
-            "pool_address":     best.get("id", "").replace("solana_", ""),
-            "name":             attrs.get("name", "Unknown"),
-            "price_usd":        float(attrs.get("base_token_price_usd") or 0),
-            "price_change_5m":  float((attrs.get("price_change_percentage") or {}).get("m5")  or 0),
-            "price_change_1h":  float((attrs.get("price_change_percentage") or {}).get("h1")  or 0),
-            "price_change_24h": float((attrs.get("price_change_percentage") or {}).get("h24") or 0),
-            "volume_24h":       float(attrs.get("volume_usd", {}).get("h24") or 0),
-            "liquidity":        float(attrs.get("reserve_in_usd") or 0),
-            "fdv":              float(attrs.get("fdv_usd") or 0),
-            "market_cap":       float(attrs.get("market_cap_usd") or 0),
-            "buys_24h":         int((attrs.get("transactions", {}).get("h24") or {}).get("buys")  or 0),
-            "sells_24h":        int((attrs.get("transactions", {}).get("h24") or {}).get("sells") or 0),
-        }
-    except Exception as e:
-        print(f"❌ GeckoTerminal error: {e}")
-        return {}
+}
 
 
-
-async def fetch_birdeye_ohlcv(ca: str, timeframe: str = "15m") -> Optional[list]:
-    """
-    Fetch OHLCV from Birdeye public API — no API key needed for basic data.
-    Returns list of {time, open, high, low, close, volume} or None.
-    """
-    tf_cfg    = TIMEFRAME_MAP.get(timeframe, TIMEFRAME_MAP["15m"])
-    interval  = tf_cfg["birdeye"]
-    limit     = 100
-
-    url = (
-        f"https://public-api.birdeye.so/defi/ohlcv"
-        f"?address={ca}&type={interval}&limit={limit}"
-    )
-    try:
-        headers = {
-            "accept":       "application/json",
-            "x-chain":      "solana",
-        }
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(url, headers=headers)
-            if r.status_code != 200:
-                print(f"❌ Birdeye OHLCV {r.status_code}: {r.text[:100]}")
-                return None
-            data  = r.json()
-            items = data.get("data", {}).get("items", [])
-            if not items:
-                return None
-            return items  # already oldest-first
-    except Exception as e:
-        print(f"❌ Birdeye OHLCV error: {e}")
-        return None
-
-async def generate_chart_image(
-    ca: str,
-    timeframe: str,
-    token_name: str,
-) -> Optional[bytes]:
-    """
-    Render a dark candlestick chart from Birdeye OHLCV data.
-    Returns PNG bytes or None on failure.
-    """
-    candles = await fetch_birdeye_ohlcv(ca, timeframe)
-    if not candles or len(candles) < 5:
-        return None
-
-    try:
-        tf_cfg = TIMEFRAME_MAP.get(timeframe, TIMEFRAME_MAP["15m"])
-        label  = tf_cfg["label"]
-
-        timestamps = [c["unixTime"] for c in candles]
-        opens      = [float(c["o"]) for c in candles]
-        highs      = [float(c["h"]) for c in candles]
-        lows       = [float(c["l"]) for c in candles]
-        closes     = [float(c["c"]) for c in candles]
-        volumes    = [float(c["v"]) for c in candles]
-
-        n  = len(candles)
-        xs = list(range(n))
-
-        # ── Theme ────────────────────────────────────────────────
-        BG        = "#0d1117"
-        GRID      = "#21262d"
-        GREEN     = "#26a641"
-        RED       = "#da3633"
-        VOL_GREEN = "#1a4d2e"
-        VOL_RED   = "#4d1a1a"
-        TEXT      = "#e6edf3"
-        SUBTEXT   = "#8b949e"
-
-        fig, (ax, ax_vol) = plt.subplots(
-            2, 1,
-            figsize=(13, 7),
-            gridspec_kw={"height_ratios": [3, 1], "hspace": 0.03},
-            facecolor=BG,
-        )
-
-        for a in (ax, ax_vol):
-            a.set_facecolor(BG)
-            a.tick_params(colors=SUBTEXT, labelsize=7.5)
-            for spine in a.spines.values():
-                spine.set_color(GRID)
-            a.yaxis.grid(True, color=GRID, linewidth=0.4, linestyle="--", alpha=0.5)
-            a.xaxis.grid(False)
-
-        # ── Candles ───────────────────────────────────────────────
-        w = 0.55
-        for i in xs:
-            o, h, l, c = opens[i], highs[i], lows[i], closes[i]
-            col = GREEN if c >= o else RED
-            ax.plot([i, i], [l, h], color=col, linewidth=0.9, zorder=2)
-            ax.bar(i, abs(c - o), bottom=min(o, c),
-                   width=w, color=col, zorder=3, linewidth=0)
-
-        # ── Volume ────────────────────────────────────────────────
-        for i in xs:
-            col = VOL_GREEN if closes[i] >= opens[i] else VOL_RED
-            ax_vol.bar(i, volumes[i], width=w, color=col, linewidth=0, alpha=0.9)
-
-        # ── Y axis formatting ─────────────────────────────────────
-        last_close = closes[-1]
-        # Auto-choose decimal places based on price magnitude
-        if last_close < 0.000001:
-            fmt = "%.10f"
-        elif last_close < 0.0001:
-            fmt = "%.8f"
-        elif last_close < 0.01:
-            fmt = "%.6f"
-        else:
-            fmt = "%.4f"
-
-        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter(fmt))
-        ax.yaxis.tick_right()
-        ax_vol.yaxis.set_major_formatter(
-            mticker.FuncFormatter(lambda x, _: f"{x/1000:.1f}K" if x >= 1000 else f"{x:.0f}")
-        )
-        ax_vol.yaxis.tick_right()
-
-        # ── X axis timestamps ─────────────────────────────────────
-        step = max(1, n // 8)
-        tick_xs     = xs[::step]
-        tick_labels = []
-        res = tf_cfg["resolution"]
-        for i in tick_xs:
-            dt = datetime.fromtimestamp(timestamps[i], tz=timezone.utc)
-            if res >= 1440:
-                tick_labels.append(dt.strftime("%m/%d"))
-            elif res >= 60:
-                tick_labels.append(dt.strftime("%d %H:%M"))
-            else:
-                tick_labels.append(dt.strftime("%H:%M"))
-
-        ax_vol.set_xticks(tick_xs)
-        ax_vol.set_xticklabels(tick_labels, color=SUBTEXT, fontsize=7)
-        ax.set_xticks([])
-
-        # ── Header text ───────────────────────────────────────────
-        first_close = closes[0]
-        pct = ((last_close - first_close) / first_close * 100) if first_close > 0 else 0
-        pct_col  = GREEN if pct >= 0 else RED
-        pct_sign = "+" if pct >= 0 else ""
-
-        fig.text(0.01, 0.97, f"{token_name}",
-                 color=TEXT, fontsize=13, fontweight="bold", va="top")
-        fig.text(0.01, 0.925, f"{fmt % last_close}   {pct_sign}{pct:.2f}%   {label}",
-                 color=pct_col, fontsize=10, va="top")
-        fig.text(0.99, 0.97, "Birdeye · XerisBot",
-                 color=SUBTEXT, fontsize=8, va="top", ha="right")
-
-        # ── Limits ────────────────────────────────────────────────
-        ax.set_xlim(-0.6, n - 0.4)
-        ax_vol.set_xlim(-0.6, n - 0.4)
-        pad = (max(highs) - min(lows)) * 0.06
-        ax.set_ylim(min(lows) - pad, max(highs) + pad)
-
-        plt.tight_layout(rect=[0, 0, 1, 0.92])
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=140,
-                    bbox_inches="tight", facecolor=BG, edgecolor="none")
-        plt.close(fig)
-        buf.seek(0)
-        return buf.read()
-
-    except Exception as e:
-        print(f"❌ Chart render error: {e}")
-        try:
-            plt.close("all")
-        except Exception:
 async def fetch_geckoterminal(ca: str) -> dict:
     """
     Fetch the strongest GeckoTerminal pool for a token.
@@ -3470,18 +3268,6 @@ async def fetch_birdeye_ohlcv(
     """
     Fetch OHLCV from Birdeye.
     Tries multiple public endpoints and normalizes the response.
-    Returns:
-        [
-          {
-            "unixTime": ...,
-            "o": ...,
-            "h": ...,
-            "l": ...,
-            "c": ...,
-            "v": ...
-          },
-          ...
-        ]
     """
     tf_cfg = TIMEFRAME_MAP.get(timeframe, TIMEFRAME_MAP["15m"])
     interval = tf_cfg["birdeye"]
@@ -3499,6 +3285,7 @@ async def fetch_birdeye_ohlcv(
 
     def _normalize_items(items: list) -> list:
         normalized = []
+
         for c in items:
             unix_time = c.get("unixTime")
             if unix_time is None:
@@ -3627,7 +3414,6 @@ async def generate_chart_image(
             a.yaxis.grid(True, color=GRID, linewidth=0.4, linestyle="--", alpha=0.5)
             a.xaxis.grid(False)
 
-        # Candles
         width = 0.55
         for i in xs:
             o = opens[i]
@@ -3640,9 +3426,8 @@ async def generate_chart_image(
             body_height = abs(c - o)
             body_bottom = min(o, c)
 
-            # Ensure tiny candles are still visible
             if body_height == 0:
-                body_height = max(last for last in [abs(max(highs) - min(lows)) * 0.0005, 1e-12])
+                body_height = max(abs(max(highs) - min(lows)) * 0.0005, 1e-12)
 
             ax.bar(
                 i,
@@ -3654,12 +3439,10 @@ async def generate_chart_image(
                 linewidth=0,
             )
 
-        # Volume
         for i in xs:
             color = VOL_GREEN if closes[i] >= opens[i] else VOL_RED
             ax_vol.bar(i, volumes[i], width=width, color=color, linewidth=0, alpha=0.9)
 
-        # Price axis format
         last_close = closes[-1]
         if last_close < 0.000001:
             fmt = "%.10f"
@@ -3677,7 +3460,6 @@ async def generate_chart_image(
         )
         ax_vol.yaxis.tick_right()
 
-        # X axis labels
         step = max(1, n // 8)
         tick_xs = xs[::step]
         tick_labels = []
@@ -3696,40 +3478,16 @@ async def generate_chart_image(
         ax_vol.set_xticklabels(tick_labels, color=SUBTEXT, fontsize=7)
         ax.set_xticks([])
 
-        # Header
         first_close = closes[0]
         pct = ((last_close - first_close) / first_close * 100) if first_close > 0 else 0.0
         pct_color = GREEN if pct >= 0 else RED
         pct_sign = "+" if pct >= 0 else ""
 
-        fig.text(
-            0.01,
-            0.97,
-            f"{token_name}",
-            color=TEXT,
-            fontsize=13,
-            fontweight="bold",
-            va="top",
-        )
-        fig.text(
-            0.01,
-            0.925,
-            f"{fmt % last_close}   {pct_sign}{pct:.2f}%   {label}",
-            color=pct_color,
-            fontsize=10,
-            va="top",
-        )
-        fig.text(
-            0.99,
-            0.97,
-            "Birdeye · XerisBot",
-            color=SUBTEXT,
-            fontsize=8,
-            va="top",
-            ha="right",
-        )
+        fig.text(0.01, 0.97, token_name, color=TEXT, fontsize=13, fontweight="bold", va="top")
+        fig.text(0.01, 0.925, f"{fmt % last_close}   {pct_sign}{pct:.2f}%   {label}",
+                 color=pct_color, fontsize=10, va="top")
+        fig.text(0.99, 0.97, "Birdeye · XerisBot", color=SUBTEXT, fontsize=8, va="top", ha="right")
 
-        # Limits
         ax.set_xlim(-0.6, n - 0.4)
         ax_vol.set_xlim(-0.6, n - 0.4)
 
@@ -3899,7 +3657,8 @@ async def cmd_chart(channel_id: int, ca: str, timeframe: str = "15m") -> None:
     else:
         embed["description"] += "\n\n⚠️ *Chart unavailable — click a timeframe above to view on GeckoTerminal*"
         await send_message(channel_id, embeds=[embed])
-    
+
+
 async def cmd_order(channel_id: int, db: DatabaseManager, ms: MarketState) -> None:
     await send_typing(channel_id)
     orders = await db.get_active_orders()
