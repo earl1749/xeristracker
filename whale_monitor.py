@@ -1,4 +1,4 @@
-import asyncio
+9import asyncio
 import json
 from unittest import signals
 import httpx
@@ -3243,7 +3243,7 @@ async def fetch_geckoterminal(ca: str) -> dict:
         return {}
 
 
-  = ((last_close - first_close) / first_close * 100) if first_close > 0 else 0
+    = ((last_close - first_close) / first_close * 100) if first_close > 0 else 0
         pct_color   = GREEN if pct_change >= 0 else RED
         pct_sign    = "+" if pct_change >= 0 else ""
 
