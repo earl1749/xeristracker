@@ -3242,11 +3242,11 @@ async def fetch_geckoterminal(ca: str) -> dict:
         return {}
 
 RESOLUTION_TO_AGGREGATE = {
-    1:    {"aggregate": 1,  "limit": 100},   # 1m  → last 100 candles
-    5:    {"aggregate": 5,  "limit": 100},   # 5m  → last 100 candles
-    15:   {"aggregate": 15, "limit": 100},   # 15m → last 100 candles
-    60:   {"aggregate": 60, "limit": 100},   # 1h  → last 100 candles
-    1440: {"aggregate": 1440, "limit": 60},  # 1d  → last 60 candles
+    1:    {"aggregate": 1,  "limit": 100, "timeframe": "minute"},
+    5:    {"aggregate": 5,  "limit": 100, "timeframe": "minute"},
+    15:   {"aggregate": 15, "limit": 100, "timeframe": "minute"},
+    60:   {"aggregate": 1,  "limit": 100, "timeframe": "hour"},   # 1h = 1 hour unit
+    1440: {"aggregate": 1,  "limit": 60,  "timeframe": "day"},    # 1d = 1 day unit
 }
 
 async def fetch_ohlcv(pool_address: str, resolution: int) -> Optional[list]:
@@ -3254,18 +3254,11 @@ async def fetch_ohlcv(pool_address: str, resolution: int) -> Optional[list]:
     Fetch OHLCV candle data from GeckoTerminal public API.
     Returns list of [timestamp, open, high, low, close, volume] or None.
     """
-    cfg        = RESOLUTION_TO_AGGREGATE.get(resolution, {"aggregate": 15, "limit": 100})
-    aggregate  = cfg["aggregate"]
-    limit      = cfg["limit"]
-
-    # GeckoTerminal OHLCV endpoint
-    if resolution < 60:
-        timeframe = "minute"
-    elif resolution < 1440:
-        timeframe = "hour"
-    else:
-        timeframe = "day"
-
+    cfg       = RESOLUTION_TO_AGGREGATE.get(resolution, {"aggregate": 15, "limit": 100, "timeframe": "minute"})
+    aggregate = cfg["aggregate"]
+    limit     = cfg["limit"]
+    timeframe = cfg["timeframe"]
+    
     url = (
         f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
         f"{pool_address}/ohlcv/{timeframe}"
