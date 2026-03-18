@@ -19,6 +19,7 @@ from collections import defaultdict
 from collections import defaultdict
 from typing import Set, Any
 import base64
+playwright.async_api import async_playwright
 
 def load_env():
     env_path = Path(__file__).parent / ".env"
