@@ -69,7 +69,11 @@ def load_programs() -> Dict[str, Any]:
 
 # Load programs
 _PROGRAMS_CACHE = load_programs()
+CHART_COOLDOWN_SECONDS = int(os.getenv("CHART_COOLDOWN_SECONDS", "15"))
+CHART_WAIT_MESSAGE_DELETE_SECONDS = int(os.getenv("CHART_WAIT_DELETE_SECONDS", "8"))
 
+_chart_cooldowns: Dict[str, float] = {}
+_chart_pending_jobs: Dict[str, asyncio.Task] = {}
 # Build program sets
 EXCHANGE_REGISTRY: Dict[str, Dict] = _PROGRAMS_CACHE.get("known_programs", {})
 DEX_PROGRAMS: set = {pid for pid, v in EXCHANGE_REGISTRY.items() if v.get("role") in ("market", "hybrid")}
@@ -456,7 +460,55 @@ async def send_message(channel_id: int, content: str = None,
 async def send_typing(channel_id: int) -> None:
     await _discord_request("POST", f"/channels/{channel_id}/typing")
 
+async def delete_message(channel_id: int, message_id: int) -> bool:
+    r = await _discord_request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
+    return r.status_code in (200, 204)
 
+
+async def send_message_get_id(
+    channel_id: int,
+    content: str = None,
+    embeds: list = None,
+    mention_everyone: bool = False,
+) -> Optional[int]:
+    payload: dict = {}
+    if content or mention_everyone:
+        payload["content"] = ("@everyone " if mention_everyone else "") + (content or "")
+    if embeds:
+        payload["embeds"] = embeds
+
+    r = await _discord_request("POST", f"/channels/{channel_id}/messages", json=payload)
+    if r.status_code not in (200, 201):
+        print(f"   ❌ Discord {r.status_code}: {r.text[:150]}")
+        return None
+
+    try:
+        data = r.json()
+        return int(data["id"])
+    except Exception:
+        return None
+
+
+async def send_temp_message(
+    channel_id: int,
+    content: str = None,
+    embeds: list = None,
+    delete_after: int = 8,
+) -> None:
+    msg_id = await send_message_get_id(channel_id, content=content, embeds=embeds)
+    if not msg_id:
+        return
+
+    async def _auto_delete():
+        try:
+            await asyncio.sleep(delete_after)
+            await delete_message(channel_id, msg_id)
+        except Exception as e:
+            print(f"⚠️ Temp delete error: {e}")
+
+    asyncio.create_task(_auto_delete())
+    
+    
 class DatabaseManager:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -3517,14 +3569,74 @@ async def generate_chart_image(
         except Exception:
             pass
         return None
+        
+def _chart_job_key(channel_id: int, ca: str, timeframe: str) -> str:
+    return f"{channel_id}:{ca}:{timeframe}"
 
 
-async def cmd_chart(channel_id: int, ca: str, timeframe: str = "15m") -> None:
-    await send_typing(channel_id)
+def _chart_remaining_seconds(channel_id: int) -> int:
+    now = time.time()
+    ready_at = _chart_cooldowns.get(str(channel_id), 0.0)
+    return max(0, int(ready_at - now))
 
+
+def _set_chart_cooldown(channel_id: int) -> None:
+    _chart_cooldowns[str(channel_id)] = time.time() + CHART_COOLDOWN_SECONDS
+
+async def cmd_chart(
+    channel_id: int,
+    ca: str,
+    timeframe: str = "15m",
+    bypass_cooldown: bool = False,
+) -> None:
     tf_clean = timeframe.lower().strip()
     if tf_clean not in TIMEFRAME_MAP:
         tf_clean = "15m"
+
+    job_key = _chart_job_key(channel_id, ca, tf_clean)
+
+    # Cooldown check
+    if not bypass_cooldown:
+        remaining = _chart_remaining_seconds(channel_id)
+        if remaining > 0:
+            # Avoid stacking duplicate pending jobs for same request
+            existing = _chart_pending_jobs.get(job_key)
+            if existing and not existing.done():
+                await send_temp_message(
+                    channel_id,
+                    content=(
+                        f"⏳ Chart is on cooldown. Your **{tf_clean}** request is already queued.\n"
+                        f"Please wait **{remaining}s**."
+                    ),
+                    delete_after=CHART_WAIT_MESSAGE_DELETE_SECONDS,
+                )
+                return
+
+            await send_temp_message(
+                channel_id,
+                content=(
+                    f"⏳ Chart command is on cooldown.\n"
+                    f"Queued your request for **{tf_clean}** and will send it automatically in **{remaining}s**."
+                ),
+                delete_after=CHART_WAIT_MESSAGE_DELETE_SECONDS,
+            )
+
+            async def _delayed_chart():
+                try:
+                    await asyncio.sleep(remaining)
+                    await cmd_chart(channel_id, ca, tf_clean, bypass_cooldown=True)
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    print(f"❌ Delayed chart job error: {e}")
+                finally:
+                    _chart_pending_jobs.pop(job_key, None)
+
+            _chart_pending_jobs[job_key] = asyncio.create_task(_delayed_chart())
+            return
+
+    await send_typing(channel_id)
+    _set_chart_cooldown(channel_id)
 
     tf_cfg = TIMEFRAME_MAP[tf_clean]
     tf_label = tf_cfg["label"]
@@ -3635,7 +3747,12 @@ async def cmd_chart(channel_id: int, ca: str, timeframe: str = "15m") -> None:
                 "inline": False,
             },
         ],
-        "footer": {"text": f"GeckoTerminal · {tf_label} · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
+        "footer": {
+            "text": (
+                f"GeckoTerminal · {tf_label} · cooldown {CHART_COOLDOWN_SECONDS}s · "
+                f"{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
+            )
+        },
         "timestamp": get_timestamp(),
     }
 
