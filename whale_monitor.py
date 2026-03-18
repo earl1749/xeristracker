@@ -19,7 +19,12 @@ from collections import defaultdict
 from collections import defaultdict
 from typing import Set, Any
 import base64
-from playwright.async_api import async_playwright
+import io
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend, required on Railway
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import FancyBboxPatch
 
 def load_env():
     env_path = Path(__file__).parent / ".env"
@@ -3194,93 +3199,200 @@ async def cmd_whale(channel_id: int, ca: str) -> None:
         "footer":    {"text": f"Via Helius RPC · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp(),
     }])    
-TIMEFRAME_MAP = {
-    "1m":  1,
-    "5m":  5,
-    "15m": 15,
-    "1h":  60,
-    "1d":  1440,
-    "1D":  1440,
+
+RESOLUTION_TO_AGGREGATE = {
+    1:    {"aggregate": 1,  "limit": 100},   # 1m  → last 100 candles
+    5:    {"aggregate": 5,  "limit": 100},   # 5m  → last 100 candles
+    15:   {"aggregate": 15, "limit": 100},   # 15m → last 100 candles
+    60:   {"aggregate": 60, "limit": 100},   # 1h  → last 100 candles
+    1440: {"aggregate": 1440, "limit": 60},  # 1d  → last 60 candles
 }
 
-async def screenshot_chart(pool_address: str, resolution: int) -> Optional[bytes]:
-    url = f"https://www.geckoterminal.com/solana/pools/{pool_address}?resolution={resolution}"
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                executable_path="/usr/bin/chromium",  # use system chromium on Railway
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--no-first-run",
-                    "--no-zygote",
-                    "--single-process",
-                ],
-            )
-            page = await browser.new_page(viewport={"width": 1280, "height": 720})
-            await page.goto(url, wait_until="networkidle", timeout=30_000)
-
-            try:
-                await page.click("text=Accept", timeout=3000)
-            except Exception:
-                pass
-
-            try:
-                await page.wait_for_selector("canvas", timeout=10_000)
-            except Exception:
-                pass
-
-            await page.wait_for_timeout(2500)
-            screenshot = await page.screenshot(full_page=False, type="png")
-            await browser.close()
-            return screenshot
-
-    except Exception as e:
-        print(f"❌ Screenshot error: {e}")
-        return None
-        
-async def fetch_geckoterminal(ca: str) -> dict:
+async def fetch_ohlcv(pool_address: str, resolution: int) -> Optional[list]:
     """
-    Fetch pool data from GeckoTerminal public API (no auth required).
-    Returns the best pool address + basic market data.
+    Fetch OHLCV candle data from GeckoTerminal public API.
+    Returns list of [timestamp, open, high, low, close, volume] or None.
     """
+    cfg        = RESOLUTION_TO_AGGREGATE.get(resolution, {"aggregate": 15, "limit": 100})
+    aggregate  = cfg["aggregate"]
+    limit      = cfg["limit"]
+
+    # GeckoTerminal OHLCV endpoint
+    if resolution < 60:
+        timeframe = "minute"
+    elif resolution < 1440:
+        timeframe = "hour"
+    else:
+        timeframe = "day"
+
+    url = (
+        f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
+        f"{pool_address}/ohlcv/{timeframe}"
+        f"?aggregate={aggregate}&limit={limit}&currency=usd&token=base"
+    )
     try:
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{ca}/pools"
         headers = {"Accept": "application/json;version=20230302"}
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(url, headers=headers)
             if r.status_code != 200:
-                return {}
+                print(f"❌ OHLCV fetch {r.status_code}: {r.text[:100]}")
+                return None
             data = r.json()
-
-        pools = data.get("data", [])
-        if not pools:
-            return {}
-
-        # Pick pool with highest liquidity (first result is already sorted by GeckoTerminal)
-        best = pools[0]
-        attrs = best.get("attributes", {})
-
-        return {
-            "pool_address":  best.get("id", "").replace("solana_", ""),
-            "name":          attrs.get("name", "Unknown"),
-            "price_usd":     float(attrs.get("base_token_price_usd") or 0),
-            "price_change_5m":  float((attrs.get("price_change_percentage") or {}).get("m5")  or 0),
-            "price_change_1h":  float((attrs.get("price_change_percentage") or {}).get("h1")  or 0),
-            "price_change_24h": float((attrs.get("price_change_percentage") or {}).get("h24") or 0),
-            "volume_24h":    float(attrs.get("volume_usd", {}).get("h24") or 0),
-            "liquidity":     float(attrs.get("reserve_in_usd") or 0),
-            "fdv":           float(attrs.get("fdv_usd") or 0),
-            "market_cap":    float(attrs.get("market_cap_usd") or 0),
-            "buys_24h":      int((attrs.get("transactions", {}).get("h24") or {}).get("buys")  or 0),
-            "sells_24h":     int((attrs.get("transactions", {}).get("h24") or {}).get("sells") or 0),
-        }
+        candles = data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
+        if not candles:
+            return None
+        # GeckoTerminal returns newest first — reverse to oldest first
+        return list(reversed(candles))
     except Exception as e:
-        print(f"❌ GeckoTerminal error: {e}")
-        return {}
+        print(f"❌ OHLCV error: {e}")
+        return None
+
+
+async def generate_chart_image(
+    pool_address: str,
+    resolution: int,
+    token_name: str,
+    tf_label: str,
+) -> Optional[bytes]:
+    """
+    Fetch OHLCV and render a dark-themed candlestick chart.
+    Returns PNG bytes or None.
+    """
+    candles = await fetch_ohlcv(pool_address, resolution)
+    if not candles or len(candles) < 5:
+        return None
+
+    try:
+        # Unpack candles: [timestamp, open, high, low, close, volume]
+        timestamps = [c[0] for c in candles]
+        opens      = [float(c[1]) for c in candles]
+        highs      = [float(c[2]) for c in candles]
+        lows       = [float(c[3]) for c in candles]
+        closes     = [float(c[4]) for c in candles]
+        volumes    = [float(c[5]) for c in candles]
+
+        n = len(candles)
+        xs = list(range(n))
+
+        # ── Colors ──────────────────────────────────────────────────────────
+        BG       = "#0d1117"
+        GRID     = "#21262d"
+        GREEN    = "#26a641"
+        RED      = "#da3633"
+        VOL_GREEN = "#1a6e2e"
+        VOL_RED   = "#7a1c1c"
+        TEXT     = "#e6edf3"
+        SUBTEXT  = "#8b949e"
+
+        fig, (ax_candle, ax_vol) = plt.subplots(
+            2, 1,
+            figsize=(12, 7),
+            gridspec_kw={"height_ratios": [3, 1], "hspace": 0.02},
+            facecolor=BG,
+        )
+
+        for ax in (ax_candle, ax_vol):
+            ax.set_facecolor(BG)
+            ax.tick_params(colors=SUBTEXT, labelsize=7)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_color(GRID)
+            ax.spines["bottom"].set_color(GRID)
+            ax.yaxis.grid(True, color=GRID, linewidth=0.5, linestyle="--", alpha=0.6)
+            ax.xaxis.grid(False)
+
+        # ── Candlesticks ────────────────────────────────────────────────────
+        candle_w = 0.6
+        for i in xs:
+            o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+            color  = GREEN if c >= o else RED
+            # Wick
+            ax_candle.plot([i, i], [l, h], color=color, linewidth=0.8, zorder=2)
+            # Body
+            body_h = abs(c - o)
+            body_y = min(o, c)
+            ax_candle.bar(i, body_h, bottom=body_y, width=candle_w,
+                          color=color, zorder=3, linewidth=0)
+
+        # ── Volume bars ─────────────────────────────────────────────────────
+        for i in xs:
+            color = VOL_GREEN if closes[i] >= opens[i] else VOL_RED
+            ax_vol.bar(i, volumes[i], width=candle_w, color=color,
+                       linewidth=0, alpha=0.85)
+
+        # ── Price range on Y axis (scientific notation off) ─────────────────
+        ax_candle.yaxis.set_major_formatter(
+            matplotlib.ticker.FormatStrFormatter("%.8f")
+        )
+        ax_candle.yaxis.tick_right()
+        ax_vol.yaxis.set_major_formatter(
+            matplotlib.ticker.FuncFormatter(
+                lambda x, _: f"{x/1000:.0f}K" if x >= 1000 else f"{x:.0f}"
+            )
+        )
+        ax_vol.yaxis.tick_right()
+
+        # ── X-axis timestamps ───────────────────────────────────────────────
+        tick_every = max(1, n // 8)
+        tick_xs    = xs[::tick_every]
+        tick_labels = []
+        for i in tick_xs:
+            dt = datetime.fromtimestamp(timestamps[i], tz=timezone.utc)
+            if resolution >= 1440:
+                tick_labels.append(dt.strftime("%m/%d"))
+            elif resolution >= 60:
+                tick_labels.append(dt.strftime("%d %H:%M"))
+            else:
+                tick_labels.append(dt.strftime("%H:%M"))
+
+        ax_vol.set_xticks(tick_xs)
+        ax_vol.set_xticklabels(tick_labels, color=SUBTEXT, fontsize=7)
+        ax_candle.set_xticks([])
+
+        # ── Title ───────────────────────────────────────────────────────────
+        last_close  = closes[-1]
+        first_close = closes[0]
+        pct_change  = ((last_close - first_close) / first_close * 100) if first_close > 0 else 0
+        pct_color   = GREEN if pct_change >= 0 else RED
+        pct_sign    = "+" if pct_change >= 0 else ""
+
+        fig.text(
+            0.01, 0.97,
+            f"{token_name}   ${last_close:.8f}",
+            color=TEXT, fontsize=13, fontweight="bold",
+            va="top", ha="left",
+        )
+        fig.text(
+            0.01, 0.91,
+            f"{pct_sign}{pct_change:.2f}%  ·  {tf_label}  ·  {n} candles",
+            color=pct_color, fontsize=9,
+            va="top", ha="left",
+        )
+        fig.text(
+            0.99, 0.97,
+            "GeckoTerminal",
+            color=SUBTEXT, fontsize=8,
+            va="top", ha="right",
+        )
+
+        # ── Limits ──────────────────────────────────────────────────────────
+        ax_candle.set_xlim(-0.5, n - 0.5)
+        ax_vol.set_xlim(-0.5, n - 0.5)
+        price_pad = (max(highs) - min(lows)) * 0.05
+        ax_candle.set_ylim(min(lows) - price_pad, max(highs) + price_pad)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.93])
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=130, bbox_inches="tight",
+                    facecolor=BG, edgecolor="none")
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+
+    except Exception as e:
+        print(f"❌ Chart render error: {e}")
+        return None
 
 async def cmd_chart(channel_id: int, ca: str, timeframe: str = "15m") -> None:
     await send_typing(channel_id)
@@ -3333,7 +3445,7 @@ async def cmd_chart(channel_id: int, ca: str, timeframe: str = "15m") -> None:
     }])
 
     # Take the screenshot
-    screenshot_bytes = await screenshot_chart(pool, resolution)
+    screenshot_bytes = await generate_chart_image(pool, resolution, name, tf_label)
 
     embed = {
         "author":      {"name": f"📊 {name} · {tf_label} Chart"},
