@@ -79,7 +79,12 @@ EXCHANGE_REGISTRY: Dict[str, Dict] = _PROGRAMS_CACHE.get("known_programs", {})
 DEX_PROGRAMS: set = {pid for pid, v in EXCHANGE_REGISTRY.items() if v.get("role") in ("market", "hybrid")}
 LIMIT_ORDER_PROGRAMS: set = {pid for pid, v in EXCHANGE_REGISTRY.items() if v.get("role") in ("limit", "hybrid")}
 ALL_KNOWN_PROGRAMS: set = set(EXCHANGE_REGISTRY.keys())
-
+X_BEARER_TOKEN      = os.getenv("X_BEARER_TOKEN", "")
+X_USERNAME          = os.getenv("X_USERNAME", "").strip().lstrip("@")
+X_CHANNEL_ID        = int(os.getenv("X_CHANNEL_ID", "0")) if os.getenv("X_CHANNEL_ID") else 0
+X_POLL_SECONDS      = int(os.getenv("X_POLL_SECONDS", "60"))
+X_INCLUDE_REPLIES   = os.getenv("X_INCLUDE_REPLIES", "false").lower() == "true"
+X_INCLUDE_RETWEETS  = os.getenv("X_INCLUDE_RETWEETS", "false").lower() == "true"
 # Additional program sets for better classification
 AGGREGATOR_PROGRAMS: Set[str] = set(_PROGRAMS_CACHE.get("aggregator_programs", []))
 SWAP_PROGRAMS: Set[str] = set(_PROGRAMS_CACHE.get("swap_programs", []))
@@ -354,6 +359,62 @@ def get_signer_token_deltas(tx_data: Dict, signer: str) -> Dict[str, float]:
         deltas[mint] += (post_amt - pre_amt) / divisor
 
     return dict(deltas)
+async def x_api_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
+    if not X_BEARER_TOKEN:
+        return None
+
+    url = f"https://api.x.com{path}"
+    headers = {
+        "Authorization": f"Bearer {X_BEARER_TOKEN}",
+        "Content-Type": "application/json",
+        "User-Agent": "XerisBot/2.0",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(url, headers=headers, params=params)
+        if r.status_code != 200:
+            print(f"❌ X API {r.status_code}: {r.text[:200]}")
+            return None
+        return r.json()
+    except Exception as e:
+        print(f"❌ X API request error: {e}")
+        return None
+
+
+async def x_get_user_by_username(username: str) -> Optional[Dict]:
+    data = await x_api_get(
+        f"/2/users/by/username/{username}",
+        params={
+            "user.fields": "id,name,username,profile_image_url,verified"
+        }
+    )
+    if not data or "data" not in data:
+        return None
+    return data["data"]
+
+
+async def x_get_latest_posts(user_id: str, limit: int = 5) -> List[Dict]:
+    exclude = []
+    if not X_INCLUDE_REPLIES:
+        exclude.append("replies")
+    if not X_INCLUDE_RETWEETS:
+        exclude.append("retweets")
+
+    params = {
+        "max_results": min(max(limit, 5), 10),
+        "tweet.fields": "created_at,public_metrics,entities,conversation_id",
+        "expansions": "author_id",
+        "user.fields": "name,username,profile_image_url,verified",
+    }
+    if exclude:
+        params["exclude"] = ",".join(exclude)
+
+    data = await x_api_get(f"/2/users/{user_id}/tweets", params=params)
+    if not data:
+        return []
+
+    return data.get("data", []) or []
 
 def get_all_program_ids(tx_data: Dict) -> Set[str]:
     programs = set()
@@ -519,6 +580,32 @@ class DatabaseManager:
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
         return self._conn
+    
+    async def get_x_watch_state(self, username: str) -> Optional[Dict]:
+        return await self._fetchone(
+            "SELECT * FROM x_watch_state WHERE username = ?",
+            (username.lower(),),
+        )
+
+    async def upsert_x_watch_state(
+        self,
+        username: str,
+        user_id: str,
+        last_post_id: str,
+        last_post_time: str = "",
+    ) -> None:
+        await self._exec(
+            """
+            INSERT INTO x_watch_state (username, user_id, last_post_id, last_post_time, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(username) DO UPDATE SET
+                user_id = excluded.user_id,
+                last_post_id = excluded.last_post_id,
+                last_post_time = excluded.last_post_time,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (username.lower(), user_id, last_post_id, last_post_time),
+        )
 
     async def _exec(self, sql: str, params: tuple = ()) -> None:
         def _go():
@@ -560,6 +647,15 @@ class DatabaseManager:
                     created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS x_watch_state (
+                    username      TEXT PRIMARY KEY,
+                    user_id       TEXT NOT NULL DEFAULT '',
+                    last_post_id  TEXT NOT NULL DEFAULT '',
+                    last_post_time TEXT NOT NULL DEFAULT '',
+                    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)            
             for col, defn in [("quote_token", "TEXT NOT NULL DEFAULT ''"),
                                ("exchange",    "TEXT NOT NULL DEFAULT ''")]:
                 try:
@@ -569,6 +665,7 @@ class DatabaseManager:
             c.execute("CREATE INDEX IF NOT EXISTS idx_wallet_active ON limit_orders(wallet, is_active)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_mcap_active ON limit_orders(predicted_mcap, is_active)")
             c.commit()
+
         await asyncio.to_thread(_go)
         print("✅ Database initialized")
 
@@ -2580,6 +2677,7 @@ class AlertManager:
         await send_message(ALERT_CHANNEL_ID, embeds=[embed])
 
 
+
 def _embed_cleanup(count: int) -> dict:
     return {
         "author":    {"name": "🧹 Order Book Cleanup"},
@@ -2642,6 +2740,8 @@ def _embed_filled(order: Dict, fill_type: OrderType, sig: str, ms: MarketState) 
         "footer":    {"text": f"Order Tracker · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp(),
     }
+
+
 
 def _build_limit_order_embed(order: LimitOrder, ms: MarketState,
                               quote_token: str = "", exchange: str = "") -> dict:
@@ -2819,7 +2919,75 @@ def _build_price_embed(pct: float, ref: float, ms: MarketState) -> dict:
         "footer":    {"text": f"Threshold ±{PRICE_ALERT_THRESHOLD}% · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp(),
     }
+def _extract_first_url_from_entities(post: Dict) -> Optional[str]:
+    entities = post.get("entities") or {}
+    urls = entities.get("urls") or []
+    if urls:
+        return urls[0].get("expanded_url") or urls[0].get("url")
+    return None
 
+
+def _build_x_post_embed(user: Dict, post: Dict) -> dict:
+    username = user.get("username", "unknown")
+    display_name = user.get("name", username)
+    verified = user.get("verified", False)
+    created_at = post.get("created_at", "")
+    text = (post.get("text") or "").strip()
+
+    post_url = f"https://x.com/{username}/status/{post['id']}"
+    linked_url = _extract_first_url_from_entities(post)
+
+    metrics = post.get("public_metrics") or {}
+    like_count = metrics.get("like_count", 0)
+    repost_count = metrics.get("retweet_count", 0)
+    reply_count = metrics.get("reply_count", 0)
+    quote_count = metrics.get("quote_count", 0)
+
+    title_name = f"{display_name} {'✅' if verified else ''}".strip()
+
+    embed = {
+        "author": {
+            "name": f"𝕏 New Post · {title_name}",
+            "url": f"https://x.com/{username}",
+        },
+        "title": f"@{username}",
+        "url": post_url,
+        "description": text[:4000] if text else "*No text*",
+        "color": 0x111111,
+        "fields": [
+            {
+                "name": "📊 Engagement",
+                "value": (
+                    f"```yaml\n"
+                    f"Likes   : {like_count:,}\n"
+                    f"Reposts : {repost_count:,}\n"
+                    f"Replies : {reply_count:,}\n"
+                    f"Quotes  : {quote_count:,}\n"
+                    f"```"
+                ),
+                "inline": True,
+            },
+            {
+                "name": "🔗 Links",
+                "value": (
+                    f"[Open Post]({post_url})"
+                    + (f" · [First Link]({linked_url})" if linked_url else "")
+                    + f" · [Profile](https://x.com/{username})"
+                ),
+                "inline": True,
+            },
+        ],
+        "footer": {
+            "text": f"X Watcher · {created_at}"
+        },
+        "timestamp": get_timestamp(),
+    }
+
+    profile_image = user.get("profile_image_url")
+    if profile_image:
+        embed["thumbnail"] = {"url": profile_image}
+
+    return embed
 
 async def update_price(ms: MarketState) -> None:
     try:
@@ -4257,7 +4425,6 @@ async def helius_monitor(db: DatabaseManager, ms: MarketState) -> None:
             print(f"❌ Helius error: {e} — retry in {wait}s")
             await asyncio.sleep(wait)
 
-
 async def announce_startup() -> None:
     await asyncio.sleep(3)
     await send_message(ALERT_CHANNEL_ID, embeds=[{
@@ -4292,7 +4459,85 @@ async def announce_startup() -> None:
         "timestamp": get_timestamp(),
     }])
 
+async def x_post_monitor(db: DatabaseManager) -> None:
+    if not X_BEARER_TOKEN or not X_USERNAME or not X_CHANNEL_ID:
+        print("ℹ️ X watcher disabled (missing X_BEARER_TOKEN, X_USERNAME, or X_CHANNEL_ID)")
+        return
 
+    print(f"🐦 Starting X watcher for @{X_USERNAME} -> channel {X_CHANNEL_ID}")
+
+    user = await x_get_user_by_username(X_USERNAME)
+    if not user:
+        print(f"❌ Could not resolve X user: @{X_USERNAME}")
+        return
+
+    user_id = user["id"]
+    username = user["username"]
+
+    state = await db.get_x_watch_state(username)
+    latest_posts = await x_get_latest_posts(user_id, limit=5)
+
+    if not latest_posts:
+        print(f"⚠️ No posts found for @{username}")
+        while True:
+            await asyncio.sleep(X_POLL_SECONDS)
+            latest_posts = await x_get_latest_posts(user_id, limit=5)
+            if latest_posts:
+                break
+
+    # On first run, store latest post but do not spam old posts
+    if not state:
+        newest = latest_posts[0]
+        await db.upsert_x_watch_state(
+            username=username,
+            user_id=user_id,
+            last_post_id=newest["id"],
+            last_post_time=newest.get("created_at", ""),
+        )
+        print(f"✅ X watcher initialized for @{username} at post {newest['id']}")
+    else:
+        print(f"✅ X watcher resumed for @{username} from post {state.get('last_post_id')}")
+
+    while True:
+        try:
+            await asyncio.sleep(X_POLL_SECONDS)
+
+            state = await db.get_x_watch_state(username)
+            last_seen_id = (state or {}).get("last_post_id", "")
+
+            posts = await x_get_latest_posts(user_id, limit=10)
+            if not posts:
+                continue
+
+            new_posts = []
+            for post in posts:
+                if post["id"] == last_seen_id:
+                    break
+                new_posts.append(post)
+
+            if not new_posts:
+                continue
+
+            # oldest -> newest so Discord shows correct order
+            new_posts.reverse()
+
+            for post in new_posts:
+                embed = _build_x_post_embed(user, post)
+                await send_message(X_CHANNEL_ID, embeds=[embed])
+                print(f"🐦 New X post sent: @{username} -> {post['id']}")
+
+            newest = posts[0]
+            await db.upsert_x_watch_state(
+                username=username,
+                user_id=user_id,
+                last_post_id=newest["id"],
+                last_post_time=newest.get("created_at", ""),
+            )
+
+        except Exception as e:
+            print(f"❌ X watcher error: {e}")
+            await asyncio.sleep(10)
+            
 async def main() -> None:
     print("\n" + "=" * 62)
     print("  🚀  XERISBOT — DISCORD BOT + THREE-TIER MONITOR")
@@ -4321,6 +4566,7 @@ async def main() -> None:
             discord_gateway(),
             helius_monitor(db, ms),
             announce_startup(),
+            x_post_monitor(db),
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n👋 Shutting down…")
