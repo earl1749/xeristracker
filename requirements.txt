@@ -1,4 +1,6 @@
 asyncio
 httpx
 websockets
-playwright
+matplotlib
+mplfinance
+aiohttp
