@@ -16,10 +16,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Set, Any
 from collections import defaultdict
-from collections import defaultdict
 from typing import Set, Any
 import base64
-import io
 import io
 import numpy as np
 import matplotlib
@@ -3201,6 +3199,15 @@ async def cmd_whale(channel_id: int, ca: str) -> None:
         "timestamp": get_timestamp(),
     }])
 
+    
+    TIMEFRAME_MAP = {
+    "1m":  {"birdeye": "1m",  "label": "1M",  "resolution": 1},
+    "5m":  {"birdeye": "5m",  "label": "5M",  "resolution": 5},
+    "15m": {"birdeye": "15m", "label": "15M", "resolution": 15},
+    "1h":  {"birdeye": "1H",  "label": "1H",  "resolution": 60},
+    "1d":  {"birdeye": "1D",  "label": "1D",  "resolution": 1440},
+    }
+
 async def fetch_geckoterminal(ca: str) -> dict:
     try:
         url = f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{ca}/pools"
@@ -3233,13 +3240,7 @@ async def fetch_geckoterminal(ca: str) -> dict:
         print(f"❌ GeckoTerminal error: {e}")
         return {}
 
-TIMEFRAME_MAP = {
-    "1m":  {"birdeye": "1m",  "label": "1M",  "resolution": 1},
-    "5m":  {"birdeye": "5m",  "label": "5M",  "resolution": 5},
-    "15m": {"birdeye": "15m", "label": "15M", "resolution": 15},
-    "1h":  {"birdeye": "1H",  "label": "1H",  "resolution": 60},
-    "1d":  {"birdeye": "1D",  "label": "1D",  "resolution": 1440},
-}
+
 
 async def fetch_birdeye_ohlcv(ca: str, timeframe: str = "15m") -> Optional[list]:
     """
@@ -3409,6 +3410,356 @@ async def generate_chart_image(
         try:
             plt.close("all")
         except Exception:
+async def fetch_geckoterminal(ca: str) -> dict:
+    """
+    Fetch the strongest GeckoTerminal pool for a token.
+    Chooses the best pool by liquidity, then 24h volume, then FDV.
+    """
+    try:
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{ca}/pools"
+        headers = {"Accept": "application/json;version=20230302"}
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(url, headers=headers)
+
+        if r.status_code != 200:
+            print(f"❌ GeckoTerminal HTTP {r.status_code}: {r.text[:120]}")
+            return {}
+
+        data = r.json()
+        pools = data.get("data", []) or []
+        if not pools:
+            print("❌ GeckoTerminal: no pools found")
+            return {}
+
+        def _pool_score(pool: dict):
+            attrs = pool.get("attributes", {}) or {}
+            reserve_usd = float(attrs.get("reserve_in_usd") or 0)
+            volume_24h = float((attrs.get("volume_usd") or {}).get("h24") or 0)
+            fdv_usd = float(attrs.get("fdv_usd") or 0)
+            return (reserve_usd, volume_24h, fdv_usd)
+
+        best = max(pools, key=_pool_score)
+        attrs = best.get("attributes", {}) or {}
+
+        return {
+            "pool_address": best.get("id", "").replace("solana_", ""),
+            "name": attrs.get("name", "Unknown"),
+            "price_usd": float(attrs.get("base_token_price_usd") or 0),
+            "price_change_5m": float((attrs.get("price_change_percentage") or {}).get("m5") or 0),
+            "price_change_1h": float((attrs.get("price_change_percentage") or {}).get("h1") or 0),
+            "price_change_24h": float((attrs.get("price_change_percentage") or {}).get("h24") or 0),
+            "volume_24h": float((attrs.get("volume_usd") or {}).get("h24") or 0),
+            "liquidity": float(attrs.get("reserve_in_usd") or 0),
+            "fdv": float(attrs.get("fdv_usd") or 0),
+            "market_cap": float(attrs.get("market_cap_usd") or 0),
+            "buys_24h": int((attrs.get("transactions") or {}).get("h24", {}).get("buys") or 0),
+            "sells_24h": int((attrs.get("transactions") or {}).get("h24", {}).get("sells") or 0),
+        }
+
+    except Exception as e:
+        print(f"❌ GeckoTerminal error: {e}")
+        return {}
+
+
+async def fetch_birdeye_ohlcv(
+    ca: str,
+    timeframe: str = "15m",
+    pool_address: Optional[str] = None,
+) -> Optional[list]:
+    """
+    Fetch OHLCV from Birdeye.
+    Tries multiple public endpoints and normalizes the response.
+    Returns:
+        [
+          {
+            "unixTime": ...,
+            "o": ...,
+            "h": ...,
+            "l": ...,
+            "c": ...,
+            "v": ...
+          },
+          ...
+        ]
+    """
+    tf_cfg = TIMEFRAME_MAP.get(timeframe, TIMEFRAME_MAP["15m"])
+    interval = tf_cfg["birdeye"]
+    limit = 100
+
+    urls = [
+        f"https://public-api.birdeye.so/defi/v3/ohlcv?address={ca}&type={interval}&limit={limit}",
+        f"https://public-api.birdeye.so/defi/ohlcv?address={ca}&type={interval}&limit={limit}",
+    ]
+
+    headers = {
+        "accept": "application/json",
+        "x-chain": "solana",
+    }
+
+    def _normalize_items(items: list) -> list:
+        normalized = []
+        for c in items:
+            unix_time = c.get("unixTime")
+            if unix_time is None:
+                unix_time = c.get("time")
+            if unix_time is None:
+                unix_time = c.get("t")
+
+            o = c.get("o")
+            if o is None:
+                o = c.get("open")
+
+            h = c.get("h")
+            if h is None:
+                h = c.get("high")
+
+            l = c.get("l")
+            if l is None:
+                l = c.get("low")
+
+            close_val = c.get("c")
+            if close_val is None:
+                close_val = c.get("close")
+
+            v = c.get("v")
+            if v is None:
+                v = c.get("volume", 0)
+
+            if unix_time is None or o is None or h is None or l is None or close_val is None:
+                continue
+
+            try:
+                normalized.append({
+                    "unixTime": int(unix_time),
+                    "o": float(o),
+                    "h": float(h),
+                    "l": float(l),
+                    "c": float(close_val),
+                    "v": float(v or 0),
+                })
+            except Exception:
+                continue
+
+        normalized.sort(key=lambda x: x["unixTime"])
+        return normalized
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for url in urls:
+                try:
+                    r = await client.get(url, headers=headers)
+                    if r.status_code != 200:
+                        print(f"❌ Birdeye OHLCV {r.status_code}: {r.text[:120]}")
+                        continue
+
+                    data = r.json()
+                    items = (data.get("data") or {}).get("items") or []
+                    candles = _normalize_items(items)
+
+                    if len(candles) >= 5:
+                        print(f"✅ Birdeye OHLCV fetched {len(candles)} candles from {url}")
+                        return candles
+
+                except Exception as inner_e:
+                    print(f"❌ Birdeye endpoint failed: {inner_e}")
+                    continue
+
+        print("❌ Birdeye OHLCV: no usable candle data")
+        return None
+
+    except Exception as e:
+        print(f"❌ Birdeye OHLCV error: {e}")
+        return None
+
+
+async def generate_chart_image(
+    ca: str,
+    timeframe: str,
+    token_name: str,
+    pool_address: Optional[str] = None,
+) -> Optional[bytes]:
+    """
+    Render a dark candlestick chart from Birdeye OHLCV data.
+    Returns PNG bytes or None on failure.
+    """
+    candles = await fetch_birdeye_ohlcv(ca, timeframe, pool_address=pool_address)
+    if not candles or len(candles) < 5:
+        print("❌ Chart generation aborted: not enough candles")
+        return None
+
+    try:
+        tf_cfg = TIMEFRAME_MAP.get(timeframe, TIMEFRAME_MAP["15m"])
+        label = tf_cfg["label"]
+
+        timestamps = [c["unixTime"] for c in candles]
+        opens = [float(c["o"]) for c in candles]
+        highs = [float(c["h"]) for c in candles]
+        lows = [float(c["l"]) for c in candles]
+        closes = [float(c["c"]) for c in candles]
+        volumes = [float(c["v"]) for c in candles]
+
+        n = len(candles)
+        xs = list(range(n))
+
+        BG = "#0d1117"
+        GRID = "#21262d"
+        GREEN = "#26a641"
+        RED = "#da3633"
+        VOL_GREEN = "#1a4d2e"
+        VOL_RED = "#4d1a1a"
+        TEXT = "#e6edf3"
+        SUBTEXT = "#8b949e"
+
+        fig, (ax, ax_vol) = plt.subplots(
+            2,
+            1,
+            figsize=(13, 7),
+            gridspec_kw={"height_ratios": [3, 1], "hspace": 0.03},
+            facecolor=BG,
+        )
+
+        for a in (ax, ax_vol):
+            a.set_facecolor(BG)
+            a.tick_params(colors=SUBTEXT, labelsize=7.5)
+            for spine in a.spines.values():
+                spine.set_color(GRID)
+            a.yaxis.grid(True, color=GRID, linewidth=0.4, linestyle="--", alpha=0.5)
+            a.xaxis.grid(False)
+
+        # Candles
+        width = 0.55
+        for i in xs:
+            o = opens[i]
+            h = highs[i]
+            l = lows[i]
+            c = closes[i]
+            color = GREEN if c >= o else RED
+
+            ax.plot([i, i], [l, h], color=color, linewidth=0.9, zorder=2)
+            body_height = abs(c - o)
+            body_bottom = min(o, c)
+
+            # Ensure tiny candles are still visible
+            if body_height == 0:
+                body_height = max(last for last in [abs(max(highs) - min(lows)) * 0.0005, 1e-12])
+
+            ax.bar(
+                i,
+                body_height,
+                bottom=body_bottom,
+                width=width,
+                color=color,
+                zorder=3,
+                linewidth=0,
+            )
+
+        # Volume
+        for i in xs:
+            color = VOL_GREEN if closes[i] >= opens[i] else VOL_RED
+            ax_vol.bar(i, volumes[i], width=width, color=color, linewidth=0, alpha=0.9)
+
+        # Price axis format
+        last_close = closes[-1]
+        if last_close < 0.000001:
+            fmt = "%.10f"
+        elif last_close < 0.0001:
+            fmt = "%.8f"
+        elif last_close < 0.01:
+            fmt = "%.6f"
+        else:
+            fmt = "%.4f"
+
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter(fmt))
+        ax.yaxis.tick_right()
+        ax_vol.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda x, _: f"{x/1000:.1f}K" if x >= 1000 else f"{x:.0f}")
+        )
+        ax_vol.yaxis.tick_right()
+
+        # X axis labels
+        step = max(1, n // 8)
+        tick_xs = xs[::step]
+        tick_labels = []
+        resolution = tf_cfg["resolution"]
+
+        for i in tick_xs:
+            dt = datetime.fromtimestamp(timestamps[i], tz=timezone.utc)
+            if resolution >= 1440:
+                tick_labels.append(dt.strftime("%m/%d"))
+            elif resolution >= 60:
+                tick_labels.append(dt.strftime("%d %H:%M"))
+            else:
+                tick_labels.append(dt.strftime("%H:%M"))
+
+        ax_vol.set_xticks(tick_xs)
+        ax_vol.set_xticklabels(tick_labels, color=SUBTEXT, fontsize=7)
+        ax.set_xticks([])
+
+        # Header
+        first_close = closes[0]
+        pct = ((last_close - first_close) / first_close * 100) if first_close > 0 else 0.0
+        pct_color = GREEN if pct >= 0 else RED
+        pct_sign = "+" if pct >= 0 else ""
+
+        fig.text(
+            0.01,
+            0.97,
+            f"{token_name}",
+            color=TEXT,
+            fontsize=13,
+            fontweight="bold",
+            va="top",
+        )
+        fig.text(
+            0.01,
+            0.925,
+            f"{fmt % last_close}   {pct_sign}{pct:.2f}%   {label}",
+            color=pct_color,
+            fontsize=10,
+            va="top",
+        )
+        fig.text(
+            0.99,
+            0.97,
+            "Birdeye · XerisBot",
+            color=SUBTEXT,
+            fontsize=8,
+            va="top",
+            ha="right",
+        )
+
+        # Limits
+        ax.set_xlim(-0.6, n - 0.4)
+        ax_vol.set_xlim(-0.6, n - 0.4)
+
+        low_min = min(lows)
+        high_max = max(highs)
+        price_range = max(high_max - low_min, max(last_close * 0.02, 1e-12))
+        pad = price_range * 0.06
+        ax.set_ylim(low_min - pad, high_max + pad)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.92])
+
+        buf = io.BytesIO()
+        plt.savefig(
+            buf,
+            format="png",
+            dpi=140,
+            bbox_inches="tight",
+            facecolor=BG,
+            edgecolor="none",
+        )
+        plt.close(fig)
+        buf.seek(0)
+        print(f"✅ Chart rendered successfully with {len(candles)} candles")
+        return buf.read()
+
+    except Exception as e:
+        print(f"❌ Chart render error: {e}")
+        try:
+            plt.close("all")
+        except Exception:
             pass
         return None
 
@@ -3419,59 +3770,66 @@ async def cmd_chart(channel_id: int, ca: str, timeframe: str = "15m") -> None:
     tf_clean = timeframe.lower().strip()
     if tf_clean not in TIMEFRAME_MAP:
         tf_clean = "15m"
-    tf_cfg   = TIMEFRAME_MAP[tf_clean]
-    tf_label = tf_cfg["label"]
-    res      = tf_cfg["resolution"]
 
-    # Fetch pool info from GeckoTerminal for market data
+    tf_cfg = TIMEFRAME_MAP[tf_clean]
+    tf_label = tf_cfg["label"]
+    res = tf_cfg["resolution"]
+
     gt = await fetch_geckoterminal(ca)
 
     if not gt or not gt.get("pool_address"):
         await send_message(channel_id, embeds=[{
-            "title":       "⚠️ Token Not Found",
+            "title": "⚠️ Token Not Found",
             "description": f"Could not find pool data for:\n```{ca}```",
-            "color":       0xF59E0B,
-            "fields": [{"name": "🔗 Try manually",
-                        "value": f"[DexScreener](https://dexscreener.com/solana/{ca})",
-                        "inline": False}],
-            "footer":    {"text": f"XerisBot · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
+            "color": 0xF59E0B,
+            "fields": [{
+                "name": "🔗 Try manually",
+                "value": f"[DexScreener](https://dexscreener.com/solana/{ca})",
+                "inline": False,
+            }],
+            "footer": {"text": f"XerisBot · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
             "timestamp": get_timestamp(),
         }])
         return
 
-    pool  = gt["pool_address"]
-    name  = gt["name"]
+    pool = gt["pool_address"]
+    name = gt["name"]
     price = gt["price_usd"]
-    p5m   = gt["price_change_5m"]
-    p1h   = gt["price_change_1h"]
-    p24h  = gt["price_change_24h"]
+    p5m = gt["price_change_5m"]
+    p1h = gt["price_change_1h"]
+    p24h = gt["price_change_24h"]
     color = 0x10B981 if p24h >= 0 else 0xEF4444
 
     total_txns = gt["buys_24h"] + gt["sells_24h"]
-    buy_ratio  = (gt["buys_24h"] / total_txns * 100) if total_txns > 0 else 0
+    buy_ratio = (gt["buys_24h"] / total_txns * 100) if total_txns > 0 else 0.0
+
+    print(f"📊 Chart request | CA={ca} | pool={pool} | tf={tf_clean}")
 
     def gt_url(r: int) -> str:
         return f"https://www.geckoterminal.com/solana/pools/{pool}?resolution={r}"
 
     def pct_str(pct: float) -> str:
-        sign  = "+" if pct >= 0 else ""
+        sign = "+" if pct >= 0 else ""
         emoji = "🟢" if pct >= 0 else "🔴"
         return f"{emoji} {sign}{pct:.2f}%"
 
-    # Loading message
     await send_message(channel_id, embeds=[{
         "description": f"📊 Generating **{tf_label}** chart for `{name}`…",
-        "color":       0x6366F1,
+        "color": 0x6366F1,
     }])
 
-    # Generate chart image
-    chart_bytes = await generate_chart_image(ca, tf_clean, name)
+    chart_bytes = await generate_chart_image(
+        ca,
+        tf_clean,
+        name,
+        pool_address=pool,
+    )
 
     embed = {
-        "author":      {"name": f"📊 {name} · {tf_label} Chart"},
-        "title":       f"${price:.8f}",
-        "url":         gt_url(res),
-        "color":       color,
+        "author": {"name": f"📊 {name} · {tf_label} Chart"},
+        "title": f"${price:.8f}",
+        "url": gt_url(res),
+        "color": color,
         "description": (
             f"[`1m`]({gt_url(1)})  ·  "
             f"[`5m`]({gt_url(5)})  ·  "
@@ -3480,28 +3838,42 @@ async def cmd_chart(channel_id: int, ca: str, timeframe: str = "15m") -> None:
             f"[`1D`]({gt_url(1440)})"
         ),
         "fields": [
-            {"name":   "📈 Price Change",
-             "value":  f"```\n5m  : {pct_str(p5m)}\n1h  : {pct_str(p1h)}\n24h : {pct_str(p24h)}\n```",
-             "inline": True},
-            {"name":   "💧 Market Data",
-             "value":  (f"```yaml\n"
-                        f"Liquidity : {format_usd(gt['liquidity'])}\n"
-                        f"Vol 24h   : {format_usd(gt['volume_24h'])}\n"
-                        f"FDV       : {format_usd(gt['fdv'])}\n```"),
-             "inline": True},
-            {"name":   "🔄 24h Txns",
-             "value":  (f"```yaml\n"
-                        f"Buys      : {gt['buys_24h']:,}\n"
-                        f"Sells     : {gt['sells_24h']:,}\n"
-                        f"Buy Ratio : {buy_ratio:.1f}%\n```"),
-             "inline": True},
-            {"name":  "🔗 Links",
-             "value": (f"[DexScreener](https://dexscreener.com/solana/{ca}) · "
-                       f"[Birdeye](https://birdeye.so/token/{ca}) · "
-                       f"[GeckoTerminal]({gt_url(res)})"),
-             "inline": False},
+            {
+                "name": "📈 Price Change",
+                "value": f"```\n5m  : {pct_str(p5m)}\n1h  : {pct_str(p1h)}\n24h : {pct_str(p24h)}\n```",
+                "inline": True,
+            },
+            {
+                "name": "💧 Market Data",
+                "value": (
+                    f"```yaml\n"
+                    f"Liquidity : {format_usd(gt['liquidity'])}\n"
+                    f"Vol 24h   : {format_usd(gt['volume_24h'])}\n"
+                    f"FDV       : {format_usd(gt['fdv'])}\n```"
+                ),
+                "inline": True,
+            },
+            {
+                "name": "🔄 24h Txns",
+                "value": (
+                    f"```yaml\n"
+                    f"Buys      : {gt['buys_24h']:,}\n"
+                    f"Sells     : {gt['sells_24h']:,}\n"
+                    f"Buy Ratio : {buy_ratio:.1f}%\n```"
+                ),
+                "inline": True,
+            },
+            {
+                "name": "🔗 Links",
+                "value": (
+                    f"[DexScreener](https://dexscreener.com/solana/{ca}) · "
+                    f"[Birdeye](https://birdeye.so/token/{ca}) · "
+                    f"[GeckoTerminal]({gt_url(res)})"
+                ),
+                "inline": False,
+            },
         ],
-        "footer":    {"text": f"Birdeye · {tf_label} · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
+        "footer": {"text": f"Birdeye · {tf_label} · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp(),
     }
 
@@ -3509,8 +3881,9 @@ async def cmd_chart(channel_id: int, ca: str, timeframe: str = "15m") -> None:
         embed["image"] = {"url": "attachment://chart.png"}
         headers = {
             "Authorization": f"Bot {DISCORD_TOKEN}",
-            "User-Agent":    "XerisBot/2.0",
+            "User-Agent": "XerisBot/2.0",
         }
+
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(
                 f"{DISCORD_API}/channels/{channel_id}/messages",
@@ -3518,8 +3891,10 @@ async def cmd_chart(channel_id: int, ca: str, timeframe: str = "15m") -> None:
                 files={"file": ("chart.png", chart_bytes, "image/png")},
                 data={"payload_json": json.dumps({"embeds": [embed]})},
             )
+
         if r.status_code not in (200, 201):
-            print(f"   ❌ Discord chart upload {r.status_code}: {r.text[:150]}")
+            print(f"❌ Discord chart upload {r.status_code}: {r.text[:150]}")
+            embed["description"] += "\n\n⚠️ *Image upload failed, but the token data was fetched successfully.*"
             await send_message(channel_id, embeds=[embed])
     else:
         embed["description"] += "\n\n⚠️ *Chart unavailable — click a timeframe above to view on GeckoTerminal*"
