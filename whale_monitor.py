@@ -3633,7 +3633,7 @@ async def cmd_help(channel_id: int) -> None:
         "fields": [
             {"name": "📈 !price <CA>",   "value": "Price, market cap, 24h volume & change, liquidity",                      "inline": False},
             {"name": "🐳 !whale <CA>",   "value": "Top 15 holders with concentration risk rating",                           "inline": False},
-            {"name": "📊 !chart <CA>",   "value": "Live GeckoTerminal chart with 1m · 5m · 15m · 1D timeframes + price change, volume, liquidity & buy/sell ratio", "inline": False},
+            {"name": "📊 !chart <CA> [tf]", "value": "Live chart screenshot from GeckoTerminal · Timeframes: `1m` `5m` `15m` `1h` `1d` · Example: `!chart <CA> 1m`", "inline": False},
             {"name": "🛡️ !analyze <CA>", "value": "Full AI risk analysis: price + holders + socials → Groq LLaMA3 verdict", "inline": False},
             {"name": "📋 !order",
              "value": (
@@ -3695,9 +3695,17 @@ async def handle_message(msg: dict) -> None:
         await cmd_whale(channel_id, arg)
     elif command == "!chart":
         if not arg or not VALID_CA.match(arg):
-            await send_message(channel_id, content="❌ Usage: `!chart <contract_address>`")
+            await send_message(channel_id, content=(
+                "❌ Usage: `!chart <contract_address> [timeframe]`\n"
+                "Timeframes: `1m` `5m` `15m` `1h` `1d`\n"
+                "Example: `!chart 9ezFth...pump 1m`"
+            ))
             return
-        await cmd_chart(channel_id, arg)
+        # Third part is optional timeframe, default 15m
+        tf = parts[2].lower() if len(parts) > 2 else "15m"
+        if tf not in TIMEFRAME_MAP:
+            tf = "15m"
+        await cmd_chart(channel_id, arg, timeframe=tf)
     elif command == "!analyze":
         if not arg or not VALID_CA.match(arg):
             await send_message(channel_id, content=(
