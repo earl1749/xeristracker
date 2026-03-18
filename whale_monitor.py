@@ -3194,37 +3194,161 @@ async def cmd_whale(channel_id: int, ca: str) -> None:
         "timestamp": get_timestamp(),
     }])
 
+async def fetch_geckoterminal(ca: str) -> dict:
+    """
+    Fetch pool data from GeckoTerminal public API (no auth required).
+    Returns the best pool address + basic market data.
+    """
+    try:
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{ca}/pools"
+        headers = {"Accept": "application/json;version=20230302"}
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(url, headers=headers)
+            if r.status_code != 200:
+                return {}
+            data = r.json()
+
+        pools = data.get("data", [])
+        if not pools:
+            return {}
+
+        # Pick pool with highest liquidity (first result is already sorted by GeckoTerminal)
+        best = pools[0]
+        attrs = best.get("attributes", {})
+
+        return {
+            "pool_address":  best.get("id", "").replace("solana_", ""),
+            "name":          attrs.get("name", "Unknown"),
+            "price_usd":     float(attrs.get("base_token_price_usd") or 0),
+            "price_change_5m":  float((attrs.get("price_change_percentage") or {}).get("m5")  or 0),
+            "price_change_1h":  float((attrs.get("price_change_percentage") or {}).get("h1")  or 0),
+            "price_change_24h": float((attrs.get("price_change_percentage") or {}).get("h24") or 0),
+            "volume_24h":    float(attrs.get("volume_usd", {}).get("h24") or 0),
+            "liquidity":     float(attrs.get("reserve_in_usd") or 0),
+            "fdv":           float(attrs.get("fdv_usd") or 0),
+            "market_cap":    float(attrs.get("market_cap_usd") or 0),
+            "buys_24h":      int((attrs.get("transactions", {}).get("h24") or {}).get("buys")  or 0),
+            "sells_24h":     int((attrs.get("transactions", {}).get("h24") or {}).get("sells") or 0),
+        }
+    except Exception as e:
+        print(f"❌ GeckoTerminal error: {e}")
+        return {}
 
 async def cmd_chart(channel_id: int, ca: str) -> None:
     await send_typing(channel_id)
-    data = await fetch_price_for_ca(ca)
-    if not data:
+
+    # Fetch from GeckoTerminal
+    gt = await fetch_geckoterminal(ca)
+
+    if not gt or not gt.get("pool_address"):
+        # Fallback to DexScreener links if GeckoTerminal has no pool
+        data = await fetch_price_for_ca(ca)
         await send_message(channel_id, embeds=[{
-            "title": "❌ Token Not Found", "description": f"```{ca}```", "color": 0xEF4444,
+            "title":       "⚠️ No GeckoTerminal Pool Found",
+            "description": (
+                f"Could not find a GeckoTerminal pool for:\n```{ca}```\n"
+                f"Try the links below instead."
+            ),
+            "color": 0xF59E0B,
+            "fields": [
+                {"name": "🔗 Fallback Charts",
+                 "value": (
+                     f"[DexScreener](https://dexscreener.com/solana/{ca})\n"
+                     f"[Birdeye](https://birdeye.so/token/{ca})\n"
+                     f"[Solscan](https://solscan.io/token/{ca})"
+                 ),
+                 "inline": False},
+            ],
+            "footer":    {"text": f"XerisBot · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
+            "timestamp": get_timestamp(),
         }])
         return
-    change = data.get("change_24h", 0)
-    color  = 0x10B981 if change >= 0 else 0xEF4444
-    sign   = "+" if change >= 0 else ""
+
+    pool  = gt["pool_address"]
+    name  = gt["name"]
+    price = gt["price_usd"]
+
+    # GeckoTerminal chart URL with timeframe resolution parameter
+    # resolution values: 1=1m, 5=5m, 15=15m, 60=1h, 1440=1d
+    def gt_url(resolution: int) -> str:
+        return f"https://www.geckoterminal.com/solana/pools/{pool}?resolution={resolution}"
+
+    # Price change helper
+    def pct_str(pct: float) -> str:
+        sign  = "+" if pct >= 0 else ""
+        emoji = "🟢" if pct >= 0 else "🔴"
+        return f"{emoji} {sign}{pct:.2f}%"
+
+    p5m  = gt["price_change_5m"]
+    p1h  = gt["price_change_1h"]
+    p24h = gt["price_change_24h"]
+
+    # Color based on 24h change
+    color = 0x10B981 if p24h >= 0 else 0xEF4444
+
+    total_txns = gt["buys_24h"] + gt["sells_24h"]
+    buy_ratio  = (gt["buys_24h"] / total_txns * 100) if total_txns > 0 else 0
+
     await send_message(channel_id, embeds=[{
-        "author": {"name": f"📊 Chart Links · {data['name']} ({data['symbol']})"},
+        "author": {"name": f"📊 GeckoTerminal Chart · {name}"},
+        "title":  f"${price:.8f}",
+        "url":    gt_url(15),   # default link opens 15m chart
         "color":  color,
+        "description": (
+            "**Select a timeframe to open the live chart:**\n\n"
+            f"[`1m`]({gt_url(1)})  ·  "
+            f"[`5m`]({gt_url(5)})  ·  "
+            f"[`15m`]({gt_url(15)})  ·  "
+            f"[`1D`]({gt_url(1440)})"
+        ),
         "fields": [
-            {"name": "📈 Quick Stats",
-             "value": f"```yaml\nPrice: ${data['price']:.8f}\n24h: {sign}{change:.2f}%\nMCap: {format_usd(data['mcap'])}\n```",
-             "inline": False},
-            {"name": "🔗 Chart Platforms",
-             "value": (f"📊 [DexScreener](https://dexscreener.com/solana/{ca})\n"
-                       f"🦅 [Birdeye](https://birdeye.so/token/{ca})\n"
-                       f"🔭 [Solscan](https://solscan.io/token/{ca})\n"
-                       f"📡 [Photon](https://photon-sol.tinyastro.io/en/lp/{data.get('pair_addr',ca)})\n"
-                       f"🌊 [Raydium](https://raydium.io/swap/?outputCurrency={ca})"),
-             "inline": False},
+            {
+                "name":   "📈 Price Change",
+                "value":  (
+                    f"```\n"
+                    f"5m  : {pct_str(p5m)}\n"
+                    f"1h  : {pct_str(p1h)}\n"
+                    f"24h : {pct_str(p24h)}\n"
+                    f"```"
+                ),
+                "inline": True,
+            },
+            {
+                "name":   "💧 Market Data",
+                "value":  (
+                    f"```yaml\n"
+                    f"Liquidity : {format_usd(gt['liquidity'])}\n"
+                    f"Vol 24h   : {format_usd(gt['volume_24h'])}\n"
+                    f"FDV       : {format_usd(gt['fdv'])}\n"
+                    f"```"
+                ),
+                "inline": True,
+            },
+            {
+                "name":   "🔄 24h Transactions",
+                "value":  (
+                    f"```yaml\n"
+                    f"Buys      : {gt['buys_24h']:,}\n"
+                    f"Sells     : {gt['sells_24h']:,}\n"
+                    f"Buy Ratio : {buy_ratio:.1f}%\n"
+                    f"```"
+                ),
+                "inline": True,
+            },
+            {
+                "name":  "🔗 More Links",
+                "value": (
+                    f"[DexScreener](https://dexscreener.com/solana/{ca}) · "
+                    f"[Birdeye](https://birdeye.so/token/{ca}) · "
+                    f"[Solscan](https://solscan.io/token/{ca}) · "
+                    f"[GeckoTerminal](https://www.geckoterminal.com/solana/pools/{pool})"
+                ),
+                "inline": False,
+            },
         ],
-        "footer":    {"text": f"XerisBot · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
+        "footer":    {"text": f"Via GeckoTerminal · Pool: {pool[:16]}… · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp(),
     }])
-
 
 async def cmd_order(channel_id: int, db: DatabaseManager, ms: MarketState) -> None:
     await send_typing(channel_id)
@@ -3463,7 +3587,7 @@ async def cmd_help(channel_id: int) -> None:
         "fields": [
             {"name": "📈 !price <CA>",   "value": "Price, market cap, 24h volume & change, liquidity",                      "inline": False},
             {"name": "🐳 !whale <CA>",   "value": "Top 15 holders with concentration risk rating",                           "inline": False},
-            {"name": "📊 !chart <CA>",   "value": "Chart links (DexScreener, Birdeye, Solscan, Photon, Raydium)",            "inline": False},
+            {"name": "📊 !chart <CA>",   "value": "Live GeckoTerminal chart with 1m · 5m · 15m · 1D timeframes + price change, volume, liquidity & buy/sell ratio", "inline": False},
             {"name": "🛡️ !analyze <CA>", "value": "Full AI risk analysis: price + holders + socials → Groq LLaMA3 verdict", "inline": False},
             {"name": "📋 !order",
              "value": (
