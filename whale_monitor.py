@@ -3193,7 +3193,54 @@ async def cmd_whale(channel_id: int, ca: str) -> None:
         "footer":    {"text": f"Via Helius RPC · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp(),
     }])
+    
+from playwright.async_api import async_playwright
 
+TIMEFRAME_MAP = {
+    "1m":  1,
+    "5m":  5,
+    "15m": 15,
+    "1h":  60,
+    "1d":  1440,
+    "1D":  1440,
+}
+
+async def screenshot_chart(pool_address: str, resolution: int) -> Optional[bytes]:
+    """
+    Opens GeckoTerminal in a headless browser and screenshots the chart.
+    Returns raw PNG bytes or None on failure.
+    """
+    url = f"https://www.geckoterminal.com/solana/pools/{pool_address}?resolution={resolution}"
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page    = await browser.new_page(viewport={"width": 1280, "height": 720})
+
+            await page.goto(url, wait_until="networkidle", timeout=30_000)
+
+            # Dismiss cookie banner if present
+            try:
+                await page.click("text=Accept", timeout=3000)
+            except Exception:
+                pass
+
+            # Wait for the chart canvas to appear
+            try:
+                await page.wait_for_selector("canvas", timeout=10_000)
+            except Exception:
+                pass
+
+            # Extra settle time for candles to render
+            await page.wait_for_timeout(2500)
+
+            screenshot = await page.screenshot(full_page=False, type="png")
+            await browser.close()
+            return screenshot
+
+    except Exception as e:
+        print(f"❌ Screenshot error: {e}")
+        return None
+        
 async def fetch_geckoterminal(ca: str) -> dict:
     """
     Fetch pool data from GeckoTerminal public API (no auth required).
@@ -3234,31 +3281,25 @@ async def fetch_geckoterminal(ca: str) -> dict:
         print(f"❌ GeckoTerminal error: {e}")
         return {}
 
-async def cmd_chart(channel_id: int, ca: str) -> None:
+async def cmd_chart(channel_id: int, ca: str, timeframe: str = "15m") -> None:
     await send_typing(channel_id)
 
-    # Fetch from GeckoTerminal
+    # Normalise timeframe
+    tf_clean = timeframe.lower().strip()
+    resolution = TIMEFRAME_MAP.get(tf_clean) or TIMEFRAME_MAP.get(timeframe) or 15
+    tf_label   = tf_clean.upper()
+
+    # Fetch pool from GeckoTerminal
     gt = await fetch_geckoterminal(ca)
 
     if not gt or not gt.get("pool_address"):
-        # Fallback to DexScreener links if GeckoTerminal has no pool
-        data = await fetch_price_for_ca(ca)
         await send_message(channel_id, embeds=[{
             "title":       "⚠️ No GeckoTerminal Pool Found",
-            "description": (
-                f"Could not find a GeckoTerminal pool for:\n```{ca}```\n"
-                f"Try the links below instead."
-            ),
-            "color": 0xF59E0B,
-            "fields": [
-                {"name": "🔗 Fallback Charts",
-                 "value": (
-                     f"[DexScreener](https://dexscreener.com/solana/{ca})\n"
-                     f"[Birdeye](https://birdeye.so/token/{ca})\n"
-                     f"[Solscan](https://solscan.io/token/{ca})"
-                 ),
-                 "inline": False},
-            ],
+            "description": f"Could not find a pool for:\n```{ca}```",
+            "color":       0xF59E0B,
+            "fields": [{"name": "🔗 Fallback",
+                         "value": f"[DexScreener](https://dexscreener.com/solana/{ca})",
+                         "inline": False}],
             "footer":    {"text": f"XerisBot · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
             "timestamp": get_timestamp(),
         }])
@@ -3268,87 +3309,92 @@ async def cmd_chart(channel_id: int, ca: str) -> None:
     name  = gt["name"]
     price = gt["price_usd"]
 
-    # GeckoTerminal chart URL with timeframe resolution parameter
-    # resolution values: 1=1m, 5=5m, 15=15m, 60=1h, 1440=1d
-    def gt_url(resolution: int) -> str:
-        return f"https://www.geckoterminal.com/solana/pools/{pool}?resolution={resolution}"
+    def gt_url(res: int) -> str:
+        return f"https://www.geckoterminal.com/solana/pools/{pool}?resolution={res}"
 
-    # Price change helper
     def pct_str(pct: float) -> str:
         sign  = "+" if pct >= 0 else ""
         emoji = "🟢" if pct >= 0 else "🔴"
         return f"{emoji} {sign}{pct:.2f}%"
 
-    p5m  = gt["price_change_5m"]
-    p1h  = gt["price_change_1h"]
-    p24h = gt["price_change_24h"]
-
-    # Color based on 24h change
+    p5m   = gt["price_change_5m"]
+    p1h   = gt["price_change_1h"]
+    p24h  = gt["price_change_24h"]
     color = 0x10B981 if p24h >= 0 else 0xEF4444
 
     total_txns = gt["buys_24h"] + gt["sells_24h"]
     buy_ratio  = (gt["buys_24h"] / total_txns * 100) if total_txns > 0 else 0
 
+    # Send a loading message first so the user knows it's working
     await send_message(channel_id, embeds=[{
-        "author": {"name": f"📊 GeckoTerminal Chart · {name}"},
-        "title":  f"${price:.8f}",
-        "url":    gt_url(15),   # default link opens 15m chart
-        "color":  color,
+        "description": f"📸 Capturing **{tf_label}** chart for `{name}`… (this takes ~5s)",
+        "color":       0x6366F1,
+    }])
+
+    # Take the screenshot
+    screenshot_bytes = await screenshot_chart(pool, resolution)
+
+    embed = {
+        "author":      {"name": f"📊 {name} · {tf_label} Chart"},
+        "title":       f"${price:.8f}",
+        "url":         gt_url(resolution),
+        "color":       color,
         "description": (
-            "**Select a timeframe to open the live chart:**\n\n"
             f"[`1m`]({gt_url(1)})  ·  "
             f"[`5m`]({gt_url(5)})  ·  "
             f"[`15m`]({gt_url(15)})  ·  "
+            f"[`1H`]({gt_url(60)})  ·  "
             f"[`1D`]({gt_url(1440)})"
         ),
         "fields": [
-            {
-                "name":   "📈 Price Change",
-                "value":  (
-                    f"```\n"
-                    f"5m  : {pct_str(p5m)}\n"
-                    f"1h  : {pct_str(p1h)}\n"
-                    f"24h : {pct_str(p24h)}\n"
-                    f"```"
-                ),
-                "inline": True,
-            },
-            {
-                "name":   "💧 Market Data",
-                "value":  (
-                    f"```yaml\n"
-                    f"Liquidity : {format_usd(gt['liquidity'])}\n"
-                    f"Vol 24h   : {format_usd(gt['volume_24h'])}\n"
-                    f"FDV       : {format_usd(gt['fdv'])}\n"
-                    f"```"
-                ),
-                "inline": True,
-            },
-            {
-                "name":   "🔄 24h Transactions",
-                "value":  (
-                    f"```yaml\n"
-                    f"Buys      : {gt['buys_24h']:,}\n"
-                    f"Sells     : {gt['sells_24h']:,}\n"
-                    f"Buy Ratio : {buy_ratio:.1f}%\n"
-                    f"```"
-                ),
-                "inline": True,
-            },
-            {
-                "name":  "🔗 More Links",
-                "value": (
-                    f"[DexScreener](https://dexscreener.com/solana/{ca}) · "
-                    f"[Birdeye](https://birdeye.so/token/{ca}) · "
-                    f"[Solscan](https://solscan.io/token/{ca}) · "
-                    f"[GeckoTerminal](https://www.geckoterminal.com/solana/pools/{pool})"
-                ),
-                "inline": False,
-            },
+            {"name":   "📈 Price Change",
+             "value":  f"```\n5m  : {pct_str(p5m)}\n1h  : {pct_str(p1h)}\n24h : {pct_str(p24h)}\n```",
+             "inline": True},
+            {"name":   "💧 Market Data",
+             "value":  (f"```yaml\n"
+                        f"Liquidity : {format_usd(gt['liquidity'])}\n"
+                        f"Vol 24h   : {format_usd(gt['volume_24h'])}\n"
+                        f"FDV       : {format_usd(gt['fdv'])}\n```"),
+             "inline": True},
+            {"name":   "🔄 24h Txns",
+             "value":  (f"```yaml\n"
+                        f"Buys      : {gt['buys_24h']:,}\n"
+                        f"Sells     : {gt['sells_24h']:,}\n"
+                        f"Buy Ratio : {buy_ratio:.1f}%\n```"),
+             "inline": True},
+            {"name":  "🔗 Links",
+             "value": (f"[DexScreener](https://dexscreener.com/solana/{ca}) · "
+                       f"[Birdeye](https://birdeye.so/token/{ca}) · "
+                       f"[GeckoTerminal](https://www.geckoterminal.com/solana/pools/{pool})"),
+             "inline": False},
         ],
-        "footer":    {"text": f"Via GeckoTerminal · Pool: {pool[:16]}… · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
+        "footer":    {"text": f"GeckoTerminal · {tf_label} · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp(),
-    }])
+    }
+
+    if screenshot_bytes:
+        # Discord requires multipart upload to attach an image file
+        import io
+        headers = {
+            "Authorization": f"Bot {DISCORD_TOKEN}",
+            "User-Agent":    "XerisBot/2.0",
+        }
+        embed["image"] = {"url": "attachment://chart.png"}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(
+                f"{DISCORD_API}/channels/{channel_id}/messages",
+                headers=headers,
+                files={"file": ("chart.png", screenshot_bytes, "image/png")},
+                data={"payload_json": json.dumps({"embeds": [embed]})},
+            )
+        if r.status_code not in (200, 201):
+            print(f"   ❌ Discord upload {r.status_code}: {r.text[:150]}")
+            # Fallback — send embed without image
+            await send_message(channel_id, embeds=[embed])
+    else:
+        # Screenshot failed — send embed with just the link
+        embed["description"] += "\n\n⚠️ *Screenshot unavailable — click a timeframe link above*"
+        await send_message(channel_id, embeds=[embed])
 
 async def cmd_order(channel_id: int, db: DatabaseManager, ms: MarketState) -> None:
     await send_typing(channel_id)
