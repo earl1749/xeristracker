@@ -20,11 +20,6 @@ from collections import defaultdict
 from typing import Set, Any
 import base64
 import io
-import matplotlib
-matplotlib.use("Agg")  # non-interactive backend, required on Railway
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from matplotlib.patches import FancyBboxPatch
 
 def load_env():
     env_path = Path(__file__).parent / ".env"
