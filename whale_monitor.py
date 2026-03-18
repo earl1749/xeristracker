@@ -3206,33 +3206,36 @@ TIMEFRAME_MAP = {
 }
 
 async def screenshot_chart(pool_address: str, resolution: int) -> Optional[bytes]:
-    """
-    Opens GeckoTerminal in a headless browser and screenshots the chart.
-    Returns raw PNG bytes or None on failure.
-    """
     url = f"https://www.geckoterminal.com/solana/pools/{pool_address}?resolution={resolution}"
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page    = await browser.new_page(viewport={"width": 1280, "height": 720})
-
+            browser = await p.chromium.launch(
+                headless=True,
+                executable_path="/usr/bin/chromium",  # use system chromium on Railway
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-first-run",
+                    "--no-zygote",
+                    "--single-process",
+                ],
+            )
+            page = await browser.new_page(viewport={"width": 1280, "height": 720})
             await page.goto(url, wait_until="networkidle", timeout=30_000)
 
-            # Dismiss cookie banner if present
             try:
                 await page.click("text=Accept", timeout=3000)
             except Exception:
                 pass
 
-            # Wait for the chart canvas to appear
             try:
                 await page.wait_for_selector("canvas", timeout=10_000)
             except Exception:
                 pass
 
-            # Extra settle time for candles to render
             await page.wait_for_timeout(2500)
-
             screenshot = await page.screenshot(full_page=False, type="png")
             await browser.close()
             return screenshot
