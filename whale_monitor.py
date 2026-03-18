@@ -3193,10 +3193,7 @@ async def cmd_whale(channel_id: int, ca: str) -> None:
         ],
         "footer":    {"text": f"Via Helius RPC · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp(),
-    }])
-    
-from playwright.async_api import async_playwright
-
+    }])    
 TIMEFRAME_MAP = {
     "1m":  1,
     "5m":  5,
