@@ -166,7 +166,7 @@ class MarketState:
 
 MINT            = os.getenv("MINT",         "9ezFthWrDUpSSeMdpLW6SDD9TJigHdc4AuQ5QN5bpump")
 DEV_WALLET      = os.getenv("DEV_WALLET",   "6XjutcUVEidzb3o1yXLYGC2ZSnjde2YvAUF9CiPVqxwm")
-WHALE_MIN_USD   = int(os.getenv("WHALE_MIN_USD", "1720"))
+WHALE_MIN_USD   = int(os.getenv("WHALE_MIN_USD", "500"))
 DB_PATH         = os.getenv("DB_PATH",      "limit_orders.db")
 HELIUS_API_KEY  = os.getenv("HELIUS_API_KEY",  "")
 DISCORD_TOKEN   = os.getenv("DISCORD_TOKEN",   "")
