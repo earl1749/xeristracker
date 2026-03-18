@@ -3198,7 +3198,48 @@ async def cmd_whale(channel_id: int, ca: str) -> None:
         ],
         "footer":    {"text": f"Via Helius RPC · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp(),
-    }])    
+    }])
+
+TIMEFRAME_MAP = {
+    "1m":  1,
+    "5m":  5,
+    "15m": 15,
+    "1h":  60,
+    "1d":  1440,
+    "1D":  1440,
+}
+
+async def fetch_geckoterminal(ca: str) -> dict:
+    try:
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{ca}/pools"
+        headers = {"Accept": "application/json;version=20230302"}
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(url, headers=headers)
+            if r.status_code != 200:
+                return {}
+            data = r.json()
+        pools = data.get("data", [])
+        if not pools:
+            return {}
+        best  = pools[0]
+        attrs = best.get("attributes", {})
+        return {
+            "pool_address":     best.get("id", "").replace("solana_", ""),
+            "name":             attrs.get("name", "Unknown"),
+            "price_usd":        float(attrs.get("base_token_price_usd") or 0),
+            "price_change_5m":  float((attrs.get("price_change_percentage") or {}).get("m5")  or 0),
+            "price_change_1h":  float((attrs.get("price_change_percentage") or {}).get("h1")  or 0),
+            "price_change_24h": float((attrs.get("price_change_percentage") or {}).get("h24") or 0),
+            "volume_24h":       float(attrs.get("volume_usd", {}).get("h24") or 0),
+            "liquidity":        float(attrs.get("reserve_in_usd") or 0),
+            "fdv":              float(attrs.get("fdv_usd") or 0),
+            "market_cap":       float(attrs.get("market_cap_usd") or 0),
+            "buys_24h":         int((attrs.get("transactions", {}).get("h24") or {}).get("buys")  or 0),
+            "sells_24h":        int((attrs.get("transactions", {}).get("h24") or {}).get("sells") or 0),
+        }
+    except Exception as e:
+        print(f"❌ GeckoTerminal error: {e}")
+        return {}
 
 RESOLUTION_TO_AGGREGATE = {
     1:    {"aggregate": 1,  "limit": 100},   # 1m  → last 100 candles
