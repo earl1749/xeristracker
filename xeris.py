@@ -1839,7 +1839,6 @@ async def update_price(ms: MarketState) -> None:
             ms.current_market_cap = float(fdv)
         else:
             ms.current_market_cap = 0.0
-        elif new_price > 0: ms.current_market_cap = float(liq.get("usd") or 0) * 2
         if ms.price_reference == 0.0 and new_price > 0: ms.price_reference = new_price
         ms.current_price = new_price; ms.last_price_update = time.time()
         print(f"💰 ${ms.current_price:.8f}  |  MCap {format_usd(ms.current_market_cap)}")
