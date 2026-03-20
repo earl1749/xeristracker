@@ -23,6 +23,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from dataclasses import dataclass
+from math import sqrt
+from typing import Dict, Literal
 
 def load_env():
     env_path = Path(__file__).parent / ".env"
@@ -168,13 +171,18 @@ class LimitOrder:
 class MarketState:
     current_price:        float = 0.0
     current_market_cap:   float = 0.0
-    total_supply:         float = 0.0
+    total_supply:         float = 1_000_000_000.0
     last_price_update:    float = 0.0
     price_reference:      float = 0.0
     last_alert_up_time:   float = 0.0
     last_alert_down_time: float = 0.0
     last_alert_direction: Optional[str] = None
     sol_price_usd:        float = 150.0
+
+    # AMM state
+    pool_token_reserve:   float = 0.0
+    pool_sol_reserve:     float = 0.0
+    pool_liquidity_usd:   float = 0.0
 
 
 MINT            = os.getenv("MINT",         "9ezFthWrDUpSSeMdpLW6SDD9TJigHdc4AuQ5QN5bpump")
@@ -216,7 +224,7 @@ DISCORD_API = "https://discord.com/api/v10"
 GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 GROQ_URL    = "https://api.groq.com/openai/v1/chat/completions"
 VALID_CA    = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
-
+X_API_BASE = os.getenv("X_API_BASE", "https://api.x.com/2").rstrip("/")
 
 def get_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -359,6 +367,34 @@ def get_signer_token_deltas(tx_data: Dict, signer: str) -> Dict[str, float]:
         deltas[mint] += (post_amt - pre_amt) / divisor
 
     return dict(deltas)
+
+def build_amm_from_market_state(ms: MarketState, fee_rate: float = 0.0025) -> Optional[ConstantProductAMM]:
+    if (
+        ms.pool_token_reserve <= 0
+        or ms.pool_sol_reserve <= 0
+        or ms.total_supply <= 0
+        or ms.sol_price_usd <= 0
+    ):
+        return None
+
+    try:
+        return ConstantProductAMM(
+            token_reserve=ms.pool_token_reserve,
+            sol_reserve=ms.pool_sol_reserve,
+            total_supply=ms.total_supply,
+            sol_price_usd=ms.sol_price_usd,
+            fee_rate=fee_rate,
+        )
+    except Exception:
+        return None
+    
+def _tweet_id_gt(a: str, b: str) -> bool:
+    try:
+        return int(a) > int(b)
+    except Exception:
+        return a > b
+
+
 async def x_api_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
     if not X_BEARER_TOKEN:
         return None
@@ -380,7 +416,6 @@ async def x_api_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
     except Exception as e:
         print(f"❌ X API request error: {e}")
         return None
-
 
 async def x_get_user_by_username(username: str) -> Optional[Dict]:
     data = await x_api_get(
@@ -436,6 +471,313 @@ def _pick_best_pair(pairs: List[Dict]) -> Optional[Dict]:
         ),
     )
 
+@dataclass
+class TradeResult:
+    direction: Literal["buy", "sell"]
+    spot_price_before_usd: float
+    spot_price_after_usd: float
+    avg_execution_price_usd: float
+    price_impact_pct: float
+    slippage_pct: float
+    market_cap_before_usd: float
+    market_cap_after_usd: float
+    tokens_received: float = 0.0
+    sol_received: float = 0.0
+    sol_spent: float = 0.0
+    tokens_sold: float = 0.0
+
+
+class ConstantProductAMM:
+    """
+    Constant-product AMM model (x * y = k)
+
+    token_reserve: token units in pool
+    sol_reserve: SOL units in pool
+    total_supply: token total supply
+    sol_price_usd: SOL/USD price
+    fee_rate: e.g. 0.0025 for 0.25%
+    """
+
+    def __init__(
+        self,
+        token_reserve: float,
+        sol_reserve: float,
+        total_supply: float,
+        sol_price_usd: float,
+        fee_rate: float = 0.0,
+    ):
+        if token_reserve <= 0 or sol_reserve <= 0:
+            raise ValueError("Reserves must be > 0")
+        if total_supply <= 0:
+            raise ValueError("Total supply must be > 0")
+        if sol_price_usd <= 0:
+            raise ValueError("SOL price must be > 0")
+        if not (0.0 <= fee_rate < 1.0):
+            raise ValueError("fee_rate must be between 0 and 1")
+
+        self.token_reserve = float(token_reserve)
+        self.sol_reserve = float(sol_reserve)
+        self.total_supply = float(total_supply)
+        self.sol_price_usd = float(sol_price_usd)
+        self.fee_rate = float(fee_rate)
+
+    @property
+    def k(self) -> float:
+        return self.token_reserve * self.sol_reserve
+
+    @property
+    def price_sol(self) -> float:
+        return self.sol_reserve / self.token_reserve
+
+    @property
+    def price_usd(self) -> float:
+        return self.price_sol * self.sol_price_usd
+
+    @property
+    def market_cap_usd(self) -> float:
+        return self.price_usd * self.total_supply
+
+    @property
+    def liquidity_usd(self) -> float:
+        token_side_usd = self.token_reserve * self.price_usd
+        sol_side_usd = self.sol_reserve * self.sol_price_usd
+        return token_side_usd + sol_side_usd
+
+    def snapshot(self) -> Dict[str, float]:
+        return {
+            "token_reserve": self.token_reserve,
+            "sol_reserve": self.sol_reserve,
+            "price_sol": self.price_sol,
+            "price_usd": self.price_usd,
+            "market_cap_usd": self.market_cap_usd,
+            "liquidity_usd": self.liquidity_usd,
+            "k": self.k,
+        }
+
+    def clone(self) -> "ConstantProductAMM":
+        return ConstantProductAMM(
+            token_reserve=self.token_reserve,
+            sol_reserve=self.sol_reserve,
+            total_supply=self.total_supply,
+            sol_price_usd=self.sol_price_usd,
+            fee_rate=self.fee_rate,
+        )
+
+    def buy_tokens(self, sol_in: float, mutate: bool = False) -> TradeResult:
+        """
+        User sends SOL, receives tokens.
+        Fee is taken from input before touching the invariant.
+        """
+        if sol_in <= 0:
+            raise ValueError("sol_in must be > 0")
+
+        old_price = self.price_usd
+        old_mcap = self.market_cap_usd
+
+        effective_sol_in = sol_in * (1.0 - self.fee_rate)
+
+        new_sol_reserve = self.sol_reserve + effective_sol_in
+        new_token_reserve = self.k / new_sol_reserve
+        tokens_out = self.token_reserve - new_token_reserve
+
+        new_price_usd = (new_sol_reserve / new_token_reserve) * self.sol_price_usd
+        new_mcap = new_price_usd * self.total_supply
+
+        avg_execution_price_sol = sol_in / tokens_out
+        avg_execution_price_usd = avg_execution_price_sol * self.sol_price_usd
+
+        price_impact_pct = ((new_price_usd - old_price) / old_price) * 100.0
+        slippage_pct = ((avg_execution_price_usd - old_price) / old_price) * 100.0
+
+        if mutate:
+            self.sol_reserve = new_sol_reserve
+            self.token_reserve = new_token_reserve
+
+        return TradeResult(
+            direction="buy",
+            spot_price_before_usd=old_price,
+            spot_price_after_usd=new_price_usd,
+            avg_execution_price_usd=avg_execution_price_usd,
+            price_impact_pct=price_impact_pct,
+            slippage_pct=slippage_pct,
+            market_cap_before_usd=old_mcap,
+            market_cap_after_usd=new_mcap,
+            tokens_received=tokens_out,
+            sol_spent=sol_in,
+        )
+
+    def sell_tokens(self, token_in: float, mutate: bool = False) -> TradeResult:
+        """
+        User sends tokens, receives SOL.
+        Fee is taken from token input before touching the invariant.
+        """
+        if token_in <= 0:
+            raise ValueError("token_in must be > 0")
+
+        old_price = self.price_usd
+        old_mcap = self.market_cap_usd
+
+        effective_token_in = token_in * (1.0 - self.fee_rate)
+
+        new_token_reserve = self.token_reserve + effective_token_in
+        new_sol_reserve = self.k / new_token_reserve
+        sol_out = self.sol_reserve - new_sol_reserve
+
+        new_price_usd = (new_sol_reserve / new_token_reserve) * self.sol_price_usd
+        new_mcap = new_price_usd * self.total_supply
+
+        avg_execution_price_sol = sol_out / token_in
+        avg_execution_price_usd = avg_execution_price_sol * self.sol_price_usd
+
+        price_impact_pct = ((new_price_usd - old_price) / old_price) * 100.0
+        slippage_pct = ((old_price - avg_execution_price_usd) / old_price) * 100.0
+
+        if mutate:
+            self.token_reserve = new_token_reserve
+            self.sol_reserve = new_sol_reserve
+
+        return TradeResult(
+            direction="sell",
+            spot_price_before_usd=old_price,
+            spot_price_after_usd=new_price_usd,
+            avg_execution_price_usd=avg_execution_price_usd,
+            price_impact_pct=price_impact_pct,
+            slippage_pct=slippage_pct,
+            market_cap_before_usd=old_mcap,
+            market_cap_after_usd=new_mcap,
+            sol_received=sol_out,
+            tokens_sold=token_in,
+        )
+
+    def market_depth(self, percentage: float) -> Dict[str, float]:
+        """
+        percentage = 1.0 means 1%
+
+        Returns quote/token needed to move spot price by that percentage.
+        Uses closed-form math from constant product.
+
+        For an upward move:
+            new_price / old_price = 1 + p
+            required effective SOL in = y * (sqrt(1+p) - 1)
+
+        For a downward move:
+            new_price / old_price = 1 - p
+            required effective token in = x * (1/sqrt(1-p) - 1)
+        """
+        p = percentage / 100.0
+        if p <= 0 or p >= 1:
+            raise ValueError("percentage must be between 0 and 100 (exclusive)")
+
+        effective_sol_in_up = self.sol_reserve * (sqrt(1.0 + p) - 1.0)
+        gross_sol_in_up = effective_sol_in_up / (1.0 - self.fee_rate)
+
+        effective_token_in_down = self.token_reserve * ((1.0 / sqrt(1.0 - p)) - 1.0)
+        gross_token_in_down = effective_token_in_down / (1.0 - self.fee_rate)
+
+        token_in_down_usd = gross_token_in_down * self.price_usd
+        sol_in_up_usd = gross_sol_in_up * self.sol_price_usd
+
+        return {
+            "up_move_pct": percentage,
+            "down_move_pct": percentage,
+            "sol_needed_for_up_move": gross_sol_in_up,
+            "usd_needed_for_up_move": sol_in_up_usd,
+            "tokens_needed_for_down_move": gross_token_in_down,
+            "usd_needed_for_down_move": token_in_down_usd,
+        }
+
+    def volume_to_reach_target_mcap(self, target_mcap_usd: float) -> Dict[str, float]:
+        """
+        Returns the buy or sell volume required to move from current mcap
+        to target mcap, assuming no other trades.
+
+        Since market cap is proportional to price:
+            target_price / current_price = target_mcap / current_mcap
+        """
+        if target_mcap_usd <= 0:
+            raise ValueError("target_mcap_usd must be > 0")
+
+        current_mcap = self.market_cap_usd
+        current_price = self.price_usd
+
+        if target_mcap_usd == current_mcap:
+            return {
+                "direction": "none",
+                "required_sol_in": 0.0,
+                "required_token_in": 0.0,
+                "required_usd": 0.0,
+                "target_price_usd": current_price,
+            }
+
+        ratio = target_mcap_usd / current_mcap
+        target_price_usd = current_price * ratio
+
+        if ratio > 1.0:
+            # Need buy pressure: y' / x' = target_price
+            # With quote in, price ratio = (1 + dy/y)^2
+            effective_sol_in = self.sol_reserve * (sqrt(ratio) - 1.0)
+            gross_sol_in = effective_sol_in / (1.0 - self.fee_rate)
+            return {
+                "direction": "buy",
+                "required_sol_in": gross_sol_in,
+                "required_token_in": 0.0,
+                "required_usd": gross_sol_in * self.sol_price_usd,
+                "target_price_usd": target_price_usd,
+            }
+
+        # ratio < 1.0
+        # Need sell pressure: price ratio = 1 / (1 + dx/x)^2
+        effective_token_in = self.token_reserve * ((1.0 / sqrt(ratio)) - 1.0)
+        gross_token_in = effective_token_in / (1.0 - self.fee_rate)
+        return {
+            "direction": "sell",
+            "required_sol_in": 0.0,
+            "required_token_in": gross_token_in,
+            "required_usd": gross_token_in * self.price_usd,
+            "target_price_usd": target_price_usd,
+        }
+
+    @staticmethod
+    def from_mcap_and_liquidity(
+        market_cap_usd: float,
+        liquidity_usd: float,
+        total_supply: float,
+        sol_price_usd: float,
+        fee_rate: float = 0.0,
+    ) -> "ConstantProductAMM":
+        """
+        Build an approximate balanced pool from:
+        - current market cap
+        - total liquidity
+        - total supply
+        - SOL price
+
+        Assumes balanced LP value:
+            token_side_usd = liquidity_usd / 2
+            sol_side_usd = liquidity_usd / 2
+
+        Token price:
+            price_usd = market_cap_usd / total_supply
+        """
+        if market_cap_usd <= 0 or liquidity_usd <= 0:
+            raise ValueError("market_cap_usd and liquidity_usd must be > 0")
+
+        price_usd = market_cap_usd / total_supply
+
+        token_side_usd = liquidity_usd / 2.0
+        sol_side_usd = liquidity_usd / 2.0
+
+        token_reserve = token_side_usd / price_usd
+        sol_reserve = sol_side_usd / sol_price_usd
+
+        return ConstantProductAMM(
+            token_reserve=token_reserve,
+            sol_reserve=sol_reserve,
+            total_supply=total_supply,
+            sol_price_usd=sol_price_usd,
+            fee_rate=fee_rate,
+        )
+        
 class DiscordQueue:
     CAPACITY      = 25
     REFILL_PERIOD = 30.0
@@ -1485,7 +1827,144 @@ def _save_learned_programs(cache: Dict[str, Dict]) -> None:
     except Exception as e:
         print(f"   ⚠️ Could not save learned programs: {e}")
 
+@dataclass
+class AMMTradeProjection:
+    new_price_usd: float
+    new_market_cap_usd: float
+    price_impact_pct: float
+    tokens_received: float = 0.0
+    sol_received: float = 0.0
 
+
+class ConstantProductAMM:
+    def __init__(
+        self,
+        token_reserve: float,
+        sol_reserve: float,
+        total_supply: float,
+        sol_price_usd: float,
+        fee_rate: float = 0.0,
+    ):
+        if token_reserve <= 0 or sol_reserve <= 0:
+            raise ValueError("AMM reserves must be > 0")
+        if total_supply <= 0:
+            raise ValueError("total_supply must be > 0")
+        if sol_price_usd <= 0:
+            raise ValueError("sol_price_usd must be > 0")
+
+        self.token_reserve = float(token_reserve)
+        self.sol_reserve = float(sol_reserve)
+        self.total_supply = float(total_supply)
+        self.sol_price_usd = float(sol_price_usd)
+        self.fee_rate = float(fee_rate)
+
+    @property
+    def k(self) -> float:
+        return self.token_reserve * self.sol_reserve
+
+    @property
+    def price_usd(self) -> float:
+        return (self.sol_reserve / self.token_reserve) * self.sol_price_usd
+
+    @property
+    def market_cap_usd(self) -> float:
+        return self.price_usd * self.total_supply
+
+    def buy_with_sol(self, sol_in: float) -> AMMTradeProjection:
+        if sol_in <= 0:
+            return AMMTradeProjection(
+                new_price_usd=self.price_usd,
+                new_market_cap_usd=self.market_cap_usd,
+                price_impact_pct=0.0,
+            )
+
+        old_price = self.price_usd
+        effective_sol_in = sol_in * (1.0 - self.fee_rate)
+
+        new_sol_reserve = self.sol_reserve + effective_sol_in
+        new_token_reserve = self.k / new_sol_reserve
+        tokens_out = self.token_reserve - new_token_reserve
+
+        new_price_usd = (new_sol_reserve / new_token_reserve) * self.sol_price_usd
+        new_mcap = new_price_usd * self.total_supply
+        impact_pct = ((new_price_usd - old_price) / old_price) * 100.0
+
+        return AMMTradeProjection(
+            new_price_usd=new_price_usd,
+            new_market_cap_usd=new_mcap,
+            price_impact_pct=impact_pct,
+            tokens_received=tokens_out,
+        )
+
+    def sell_tokens(self, token_in: float) -> AMMTradeProjection:
+        if token_in <= 0:
+            return AMMTradeProjection(
+                new_price_usd=self.price_usd,
+                new_market_cap_usd=self.market_cap_usd,
+                price_impact_pct=0.0,
+            )
+
+        old_price = self.price_usd
+        effective_token_in = token_in * (1.0 - self.fee_rate)
+
+        new_token_reserve = self.token_reserve + effective_token_in
+        new_sol_reserve = self.k / new_token_reserve
+        sol_out = self.sol_reserve - new_sol_reserve
+
+        new_price_usd = (new_sol_reserve / new_token_reserve) * self.sol_price_usd
+        new_mcap = new_price_usd * self.total_supply
+        impact_pct = ((new_price_usd - old_price) / old_price) * 100.0
+
+        return AMMTradeProjection(
+            new_price_usd=new_price_usd,
+            new_market_cap_usd=new_mcap,
+            price_impact_pct=impact_pct,
+            sol_received=sol_out,
+        )
+
+    def sol_needed_for_target_mcap(self, target_mcap_usd: float) -> float:
+        current_mcap = self.market_cap_usd
+        if target_mcap_usd <= current_mcap:
+            return 0.0
+
+        ratio = target_mcap_usd / current_mcap
+        effective_sol_in = self.sol_reserve * (sqrt(ratio) - 1.0)
+        return effective_sol_in / (1.0 - self.fee_rate)
+
+    def token_needed_for_target_mcap(self, target_mcap_usd: float) -> float:
+        current_mcap = self.market_cap_usd
+        if target_mcap_usd >= current_mcap or target_mcap_usd <= 0:
+            return 0.0
+
+        ratio = target_mcap_usd / current_mcap
+        effective_token_in = self.token_reserve * ((1.0 / sqrt(ratio)) - 1.0)
+        return effective_token_in / (1.0 - self.fee_rate)
+
+    def market_depth(self, pct: float) -> Dict[str, float]:
+        """
+        pct = 1.0 for 1%
+        """
+        p = pct / 100.0
+        if p <= 0 or p >= 1:
+            return {
+                "sol_for_up_move": 0.0,
+                "usd_for_up_move": 0.0,
+                "tokens_for_down_move": 0.0,
+                "usd_for_down_move": 0.0,
+            }
+
+        effective_sol_in = self.sol_reserve * (sqrt(1.0 + p) - 1.0)
+        gross_sol_in = effective_sol_in / (1.0 - self.fee_rate)
+
+        effective_token_in = self.token_reserve * ((1.0 / sqrt(1.0 - p)) - 1.0)
+        gross_token_in = effective_token_in / (1.0 - self.fee_rate)
+
+        return {
+            "sol_for_up_move": gross_sol_in,
+            "usd_for_up_move": gross_sol_in * self.sol_price_usd,
+            "tokens_for_down_move": gross_token_in,
+            "usd_for_down_move": gross_token_in * self.price_usd,
+        }
 class TransactionClassifier:
     def __init__(self) -> None:
         self._scorer  = SuspicionScorer()
@@ -1499,6 +1978,74 @@ class TransactionClassifier:
         if pid in self._learned:
             return self._learned[pid]["role"]
         return None
+    
+    def _signer_sol_flows(self, tx_data: Dict, signer: str) -> Tuple[float, float]:
+        """
+        Returns:
+        (sol_spent_beyond_fee, sol_received_after_fee)
+        """
+        meta = tx_data.get("meta", {})
+        keys = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
+
+        signer_idx = None
+        for i, k in enumerate(keys):
+            pub = k.get("pubkey") if isinstance(k, dict) else k
+            if pub == signer:
+                signer_idx = i
+                break
+
+        if signer_idx is None:
+            return 0.0, 0.0
+
+        pre_bal = meta.get("preBalances", [])
+        post_bal = meta.get("postBalances", [])
+        fee = meta.get("fee", 5000)
+
+        if signer_idx >= len(pre_bal) or signer_idx >= len(post_bal):
+            return 0.0, 0.0
+
+        raw_diff = pre_bal[signer_idx] - post_bal[signer_idx]  # positive = signer lost SOL
+
+        sol_spent_beyond_fee = max(0.0, (raw_diff - fee)) / 1e9
+        sol_received_after_fee = max(0.0, (-raw_diff - fee)) / 1e9
+
+        return sol_spent_beyond_fee, sol_received_after_fee
+    def _derive_trade_value_from_flows(
+        self,
+        deltas: Dict[str, float],
+        ms: MarketState,
+        target_delta: float,
+        sol_spent: float,
+        sol_received: float,
+    ) -> Tuple[float, str]:
+        """
+        Returns (usd_value, quote_symbol)
+        """
+        stablecoins = {
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "USDT",
+        }
+
+        # prefer stablecoin deltas
+        for mint, symbol in stablecoins.items():
+            amt = abs(deltas.get(mint, 0.0))
+            if amt > 0:
+                return amt, symbol
+
+        wsol_amt = abs(deltas.get(WSOL_MINT, 0.0))
+        if wsol_amt > 0:
+            return wsol_amt * ms.sol_price_usd, "SOL"
+
+        if sol_spent > 0.001:
+            return sol_spent * ms.sol_price_usd, "SOL"
+
+        if sol_received > 0.001:
+            return sol_received * ms.sol_price_usd, "SOL"
+
+        if abs(target_delta) > 0 and ms.current_price > 0:
+            return abs(target_delta) * ms.current_price, ""
+
+        return 0.0, ""
 
     def _learn(self, program_ids: set, order_type: OrderType,
             exchange: str, confidence: float) -> None:
@@ -1702,292 +2249,283 @@ class TransactionClassifier:
         return OrderType.UNKNOWN, None
 
     def _rule_based(
-            self, tx_data: Dict, signer: str, ms: MarketState
-        ) -> Tuple[OrderType, Optional[Dict]]:
-            meta = tx_data.get("meta", {})
-            if meta.get("err"):
-                return OrderType.UNKNOWN, None
+        self, tx_data: Dict, signer: str, ms: MarketState
+    ) -> Tuple[OrderType, Optional[Dict]]:
+        meta = tx_data.get("meta", {})
+        if meta.get("err"):
+            return OrderType.UNKNOWN, None
 
-            programs     = get_all_program_ids(tx_data)
-            all_ixs      = get_all_instructions(tx_data)
-            deltas       = get_signer_token_deltas(tx_data, signer)
-            target_delta = deltas.get(MINT, 0.0)
+        programs = get_all_program_ids(tx_data)
+        all_ixs = get_all_instructions(tx_data)
+        deltas = get_signer_token_deltas(tx_data, signer)
+        target_delta = deltas.get(MINT, 0.0)
+        sol_spent, sol_received = self._signer_sol_flows(tx_data, signer)
 
-            learned_limit_hits  = {p for p in programs if self._known_role(p) in ("limit", "hybrid")}
-            learned_market_hits = {p for p in programs if self._known_role(p) in ("market", "hybrid")}
+        learned_limit_hits = {p for p in programs if self._known_role(p) in ("limit", "hybrid")}
+        learned_market_hits = {p for p in programs if self._known_role(p) in ("market", "hybrid")}
 
-            limit_hits  = (programs & LIMIT_ORDER_PROGRAMS) | learned_limit_hits
-            market_hits = (programs & ALL_SWAP_PROGRAMS) | (programs & DEX_PROGRAMS) | learned_market_hits
+        limit_hits = (programs & LIMIT_ORDER_PROGRAMS) | learned_limit_hits
+        market_hits = (programs & ALL_SWAP_PROGRAMS) | (programs & DEX_PROGRAMS) | learned_market_hits
 
-            # ── cancel detection ────────────────────────────────────────────────
-            has_cancel = False
-            for ix in all_ixs:
-                raw = self._decode_ix_data(ix.get("data", ""))
-                if raw and len(raw) >= 8 and DISCRIMINATORS.get(raw[:8]) == "cancel_order":
-                    has_cancel = True
-                    break
-            logs_lc = " ".join(meta.get("logMessages") or []).lower()
-            if "cancel" in logs_lc or "withdraw order" in logs_lc or "close order" in logs_lc:
+        # ── cancel detection ────────────────────────────────────────────────
+        has_cancel = False
+        for ix in all_ixs:
+            raw = self._decode_ix_data(ix.get("data", ""))
+            if raw and len(raw) >= 8 and DISCRIMINATORS.get(raw[:8]) == "cancel_order":
                 has_cancel = True
+                break
 
-            # ── new-order detection ─────────────────────────────────────────────
-            has_new_order = False
-            for ix in all_ixs:
-                raw = self._decode_ix_data(ix.get("data", ""))
-                if raw and len(raw) >= 8 and DISCRIMINATORS.get(raw[:8]) == "new_order":
-                    has_new_order = True
-                    break
-            if any(k in logs_lc for k in ["new order", "place order", "post only", "post-only", "limit"]):
+        logs_lc = " ".join(meta.get("logMessages") or []).lower()
+        if "cancel" in logs_lc or "withdraw order" in logs_lc or "close order" in logs_lc:
+            has_cancel = True
+
+        # ── new-order detection ─────────────────────────────────────────────
+        has_new_order = False
+        for ix in all_ixs:
+            raw = self._decode_ix_data(ix.get("data", ""))
+            if raw and len(raw) >= 8 and DISCRIMINATORS.get(raw[:8]) == "new_order":
                 has_new_order = True
+                break
+        if any(k in logs_lc for k in ["new order", "place order", "post only", "post-only", "limit"]):
+            has_new_order = True
 
-            # ── quote token helpers ─────────────────────────────────────────────
-            negative_quotes = []
-            positive_quotes = []
-            for mint, delta in deltas.items():
-                if mint == MINT or abs(delta) < 1e-12:
-                    continue
-                if delta < 0:
-                    negative_quotes.append((mint, abs(delta)))
-                elif delta > 0:
-                    positive_quotes.append((mint, abs(delta)))
+        # ── quote token helpers ─────────────────────────────────────────────
+        negative_quotes = []
+        positive_quotes = []
+        for mint, delta in deltas.items():
+            if mint == MINT or abs(delta) < 1e-12:
+                continue
+            if delta < 0:
+                negative_quotes.append((mint, abs(delta)))
+            elif delta > 0:
+                positive_quotes.append((mint, abs(delta)))
 
-            def pick_quote(cands: List[Tuple[str, float]]) -> Optional[str]:
-                if not cands:
-                    return None
-                preferred = [
-                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-                    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
-                    WSOL_MINT,
-                ]
-                for pref in preferred:
-                    for mint, _ in cands:
-                        if mint == pref:
-                            return mint
-                return max(cands, key=lambda x: x[1])[0]
+        def pick_quote(cands: List[Tuple[str, float]]) -> Optional[str]:
+            if not cands:
+                return None
+            preferred = [
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+                "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+                WSOL_MINT,
+            ]
+            for pref in preferred:
+                for mint, _ in cands:
+                    if mint == pref:
+                        return mint
+            return max(cands, key=lambda x: x[1])[0]
 
-            def quote_usd_value(mint: Optional[str], abs_amount: float) -> float:
-                if not mint or abs_amount <= 0:
-                    return 0.0
-                if mint in (
-                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-                ):
-                    return abs_amount
-                if mint == WSOL_MINT:
-                    return abs_amount * ms.sol_price_usd
+        def quote_usd_value(mint: Optional[str], abs_amount: float) -> float:
+            if not mint or abs_amount <= 0:
                 return 0.0
+            if mint in (
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+            ):
+                return abs_amount
+            if mint == WSOL_MINT:
+                return abs_amount * ms.sol_price_usd
+            return 0.0
 
-            # ── SOL balance helper (fee-aware) ──────────────────────────────────
-            # Returns (sol_spent_to_escrow, sol_received_after_fee)
-            # native SOL is invisible to get_signer_token_deltas(), so we must
-            # read it directly from pre/post SOL balances.
-            def signer_sol_change() -> Tuple[float, float]:
-                keys_l = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
-                si = next(
-                    (i for i, k in enumerate(keys_l)
-                    if (k.get("pubkey") if isinstance(k, dict) else k) == signer), None
-                )
-                if si is None:
-                    return 0.0, 0.0
-                pre_b  = meta.get("preBalances",  [])
-                post_b = meta.get("postBalances", [])
-                fee    = meta.get("fee", 5000)
-                if si >= len(pre_b) or si >= len(post_b):
-                    return 0.0, 0.0
-                diff    = pre_b[si] - post_b[si]                    # positive = signer lost SOL
-                spent   = max(0.0, (diff - fee)) / 1e9              # SOL locked to escrow
-                received = max(0.0, (-diff - fee)) / 1e9            # SOL received from swap
-                return spent, received
+        def signer_sol_change() -> Tuple[float, float]:
+            keys_l = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
+            si = next(
+                (
+                    i for i, k in enumerate(keys_l)
+                    if (k.get("pubkey") if isinstance(k, dict) else k) == signer
+                ),
+                None,
+            )
+            if si is None:
+                return 0.0, 0.0
+            pre_b = meta.get("preBalances", [])
+            post_b = meta.get("postBalances", [])
+            fee = meta.get("fee", 5000)
+            if si >= len(pre_b) or si >= len(post_b):
+                return 0.0, 0.0
+            diff = pre_b[si] - post_b[si]  # positive = signer lost SOL
+            spent = max(0.0, (diff - fee)) / 1e9
+            received = max(0.0, (-diff - fee)) / 1e9
+            return spent, received
 
-            # ===================================================================
-            # 1) CANCEL LIMIT — always first, unambiguous
-            # ===================================================================
-            if limit_hits and has_cancel:
-                return OrderType.CANCEL_LIMIT, {
-                    "wallet":      signer,
-                    "signature":   tx_data.get("signature", ""),
-                    "exchange":    ", ".join(
-                        exchange_name(p) if p in EXCHANGE_REGISTRY
-                        else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
-                        for p in sorted(limit_hits)
-                    ),
-                    "quote_token": "",
-                }
-
-            # ===================================================================
-            # 2) MARKET BUY / SELL
-            #    Checked BEFORE limit. Real token movement + swap program = market,
-            #    regardless of whether a limit program is also present.
-            # ===================================================================
-            if abs(target_delta) > 1e-12 and market_hits:
-                if target_delta > 0:
-                    quote_mint   = pick_quote(negative_quotes)
-                    quote_symbol = KNOWN_TOKEN_LABELS.get(
-                        quote_mint, f"{quote_mint[:8]}…" if quote_mint else "SOL"
-                    )
-                    usd_value = quote_usd_value(quote_mint, abs(deltas.get(quote_mint, 0.0)))
-                    if usd_value < 5.0:
-                        usd_value = 0.0
-                    if usd_value <= 0:
-                        usd_value = target_delta * ms.current_price
-                    ex_names = [
-                        exchange_name(p) if p in EXCHANGE_REGISTRY
-                        else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
-                        for p in sorted(market_hits)
-                    ]
-                    return OrderType.MARKET_BUY, {
-                        "wallet":      signer,
-                        "amount":      target_delta,
-                        "usd_value":   usd_value,
-                        "exchange":    ", ".join(ex_names),
-                        "quote_token": quote_symbol,
-                    }
-
-                if target_delta < 0:
-                    quote_mint   = pick_quote(positive_quotes)
-                    quote_symbol = KNOWN_TOKEN_LABELS.get(
-                        quote_mint, f"{quote_mint[:8]}…" if quote_mint else "SOL"
-                    )
-                    usd_value = quote_usd_value(quote_mint, abs(deltas.get(quote_mint, 0.0)))
-                    if usd_value <= 0:
-                        usd_value = abs(target_delta) * ms.current_price
-                    ex_names = [
-                        exchange_name(p) if p in EXCHANGE_REGISTRY
-                        else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
-                        for p in sorted(market_hits)
-                    ]
-                    return OrderType.MARKET_SELL, {
-                        "wallet":      signer,
-                        "amount":      abs(target_delta),
-                        "usd_value":   usd_value,
-                        "exchange":    ", ".join(ex_names),
-                        "quote_token": quote_symbol,
-                    }
-
-            # ===================================================================
-            # 2b) HYBRID GUARD
-            #     Both market + limit programs present, zero token movement.
-            #     Only allow limit detection if there is real escrow evidence.
-            #     Without it, return UNKNOWN — never guess limit from programs alone.
-            # ===================================================================
-            if limit_hits and market_hits and abs(target_delta) < 1e-12:
-                sol_spent, _ = signer_sol_change()
-                if not negative_quotes and sol_spent <= 0.01:
-                    return OrderType.UNKNOWN, None
-
-            # ===================================================================
-            # 3) LIMIT BUY
-            #    All conditions must be true:
-            #      - known limit program present
-            #      - target token did NOT move (still in escrow waiting for fill)
-            #      - a new-order signal exists (prevents fills/rent calls)
-            #      - real value left the signer (quote token OR SOL to escrow)
-            #      - derived USD value >= $5
-            # ===================================================================
-            if limit_hits and abs(target_delta) < 1e-12:
-                has_placement_signal = has_new_order or any(
-                    k in logs_lc for k in ["place", "init", "create", "new order"]
-                )
-                if has_placement_signal:
-                    quote_mint = pick_quote(negative_quotes)
-                    usd_value  = quote_usd_value(quote_mint, abs(deltas.get(quote_mint, 0.0)))
-
-                    if usd_value < 5.0:
-                        usd_value = 0.0
-
-                    # SOL-to-escrow fallback — threshold 0.01 SOL skips ATA rent
-                    # (~0.002 SOL) and compute budget noise
-                    if usd_value <= 0:
-                        sol_spent, _ = signer_sol_change()
-                        if sol_spent > 0.01:
-                            usd_value = sol_spent * ms.sol_price_usd
-
-                    if usd_value >= 5.0:
-                        amount = usd_value / ms.current_price if ms.current_price > 0 else 0.0
-                        tp     = ms.current_price
-                        ex_names = [
-                            exchange_name(p) if p in EXCHANGE_REGISTRY
-                            else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
-                            for p in sorted(limit_hits)
-                        ]
-                        return OrderType.LIMIT_BUY, {
-                            "wallet":         signer,
-                            "amount":         amount,
-                            "usd_value":      usd_value,
-                            "target_price":   tp,
-                            "predicted_mcap": self._predict_mcap(tp, ms),
-                            "exchange":       ", ".join(ex_names),
-                            "quote_token":    KNOWN_TOKEN_LABELS.get(
-                                quote_mint, f"{quote_mint[:8]}…" if quote_mint else ""
-                            ),
-                        }
-
-            # ===================================================================
-            # 4) LIMIT SELL
-            #    All conditions must be true:
-            #      - known limit program present
-            #      - target token decreased (locked into escrow)
-            #      - NO market program overlap
-            #      - signer did NOT receive SOL — SOL receipt means market sell.
-            #        (positive_quotes is empty for SOL-quote sells because native
-            #         SOL is invisible to get_signer_token_deltas, so we MUST
-            #         check the SOL balance directly here)
-            #      - a new-order signal exists
-            #      - derived USD value >= $5
-            # ===================================================================
-            if limit_hits and target_delta < 0 and not market_hits:
-                _, sol_received = signer_sol_change()
-
-                # If signer received meaningful SOL, this is a market sell
-                if sol_received > 0.001:
-                    return OrderType.UNKNOWN, None
-
-                # Require a new-order signal — prevents limit fills from
-                # being stored as new limit sell placements
-                has_placement_signal = has_new_order or any(
-                    k in logs_lc for k in ["place", "init", "create", "new order"]
-                )
-                if not has_placement_signal:
-                    return OrderType.UNKNOWN, None
-
-                amount    = abs(target_delta)
-                usd_value = amount * ms.current_price
-                if usd_value < 5.0:
-                    return OrderType.UNKNOWN, None
-
-                tp = ms.current_price
-                ex_names = [
+        # ===================================================================
+        # 1) CANCEL LIMIT — always first, unambiguous
+        # ===================================================================
+        if limit_hits and has_cancel:
+            return OrderType.CANCEL_LIMIT, {
+                "wallet": signer,
+                "signature": tx_data.get("signature", ""),
+                "exchange": ", ".join(
                     exchange_name(p) if p in EXCHANGE_REGISTRY
                     else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
                     for p in sorted(limit_hits)
-                ]
-                return OrderType.LIMIT_SELL, {
-                    "wallet":         signer,
-                    "amount":         amount,
-                    "usd_value":      usd_value,
-                    "target_price":   tp,
-                    "predicted_mcap": self._predict_mcap(tp, ms),
-                    "exchange":       ", ".join(ex_names),
-                    "quote_token":    "",
-                }
+                ),
+                "quote_token": "",
+            }
 
-            # ===================================================================
-            # 5) TRANSFER
-            # ===================================================================
-            non_target_changes = [
-                mint for mint, delta in deltas.items()
-                if mint != MINT and abs(delta) > 1e-12
+        # ===================================================================
+        # 2) EXECUTED BUY / SELL
+        #    If target token changed and signer also paid/received quote in the
+        #    same transaction, it is already executed — even if only a limit
+        #    program is present and no swap program appears.
+        # ===================================================================
+        if abs(target_delta) > 1e-12:
+            usd_value, quote_symbol = self._derive_trade_value_from_flows(
+                deltas=deltas,
+                ms=ms,
+                target_delta=target_delta,
+                sol_spent=sol_spent,
+                sol_received=sol_received,
+            )
+
+            has_buy_consideration = (
+                target_delta > 0 and (
+                    any(delta < 0 for mint, delta in deltas.items() if mint != MINT)
+                    or sol_spent > 0.001
+                )
+            )
+
+            has_sell_consideration = (
+                target_delta < 0 and (
+                    any(delta > 0 for mint, delta in deltas.items() if mint != MINT)
+                    or sol_received > 0.001
+                )
+            )
+
+            exchange_hits = sorted(market_hits | limit_hits)
+            ex_names = [
+                exchange_name(p) if p in EXCHANGE_REGISTRY
+                else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
+                for p in exchange_hits
             ]
-            if abs(target_delta) > 1e-12 and not limit_hits and not market_hits and not non_target_changes:
-                return OrderType.TRANSFER, {
-                    "wallet":      signer,
-                    "amount":      abs(target_delta),
-                    "usd_value":   abs(target_delta) * ms.current_price,
-                    "to":          "unknown",
-                    "quote_token": "",
+
+            if has_buy_consideration:
+                return OrderType.MARKET_BUY, {
+                    "wallet": signer,
+                    "amount": abs(target_delta),
+                    "usd_value": usd_value,
+                    "exchange": ", ".join(ex_names),
+                    "quote_token": quote_symbol,
                 }
 
-            return OrderType.UNKNOWN, None
+            if has_sell_consideration:
+                return OrderType.MARKET_SELL, {
+                    "wallet": signer,
+                    "amount": abs(target_delta),
+                    "usd_value": usd_value,
+                    "exchange": ", ".join(ex_names),
+                    "quote_token": quote_symbol,
+                }
+
+        # ===================================================================
+        # 2b) HYBRID GUARD
+        # ===================================================================
+        if limit_hits and market_hits and abs(target_delta) < 1e-12:
+            sol_spent_check, _ = signer_sol_change()
+            if not negative_quotes and sol_spent_check <= 0.01:
+                return OrderType.UNKNOWN, None
+
+        # ===================================================================
+        # 3) LIMIT BUY
+        #    Do NOT invent target price.
+        #    If the price cannot be derived directly, store target_price=0 and
+        #    predicted_mcap=0 so it doesn't create fake support levels.
+        # ===================================================================
+        if limit_hits and abs(target_delta) < 1e-12:
+            has_placement_signal = has_new_order or any(
+                k in logs_lc for k in ["place", "init", "create", "new order"]
+            )
+            if has_placement_signal:
+                quote_mint = pick_quote(negative_quotes)
+                usd_value = quote_usd_value(quote_mint, abs(deltas.get(quote_mint, 0.0)))
+
+                if usd_value < 5.0:
+                    usd_value = 0.0
+
+                if usd_value <= 0:
+                    sol_spent_check, _ = signer_sol_change()
+                    if sol_spent_check > 0.02:
+                        usd_value = sol_spent_check * ms.sol_price_usd
+
+                if usd_value >= 5.0:
+                    amount = usd_value / ms.current_price if ms.current_price > 0 else 0.0
+                    tp = self._estimate_target_price(tx_data, amount, ms)
+                    predicted_mcap = self._predict_mcap(tp, ms) if tp > 0 else 0.0
+
+                    ex_names = [
+                        exchange_name(p) if p in EXCHANGE_REGISTRY
+                        else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
+                        for p in sorted(limit_hits)
+                    ]
+
+                    return OrderType.LIMIT_BUY, {
+                        "wallet": signer,
+                        "amount": amount,
+                        "usd_value": usd_value,
+                        "target_price": tp,
+                        "predicted_mcap": predicted_mcap,
+                        "exchange": ", ".join(ex_names),
+                        "quote_token": KNOWN_TOKEN_LABELS.get(
+                            quote_mint, f"{quote_mint[:8]}…" if quote_mint else ""
+                        ),
+                    }
+
+        # ===================================================================
+        # 4) LIMIT SELL
+        #    Do NOT invent target price.
+        # ===================================================================
+        if limit_hits and target_delta < 0 and not market_hits:
+            _, sol_received_check = signer_sol_change()
+
+            if sol_received_check > 0.001:
+                return OrderType.UNKNOWN, None
+
+            has_placement_signal = has_new_order or any(
+                k in logs_lc for k in ["place", "init", "create", "new order"]
+            )
+            if not has_placement_signal:
+                return OrderType.UNKNOWN, None
+
+            amount = abs(target_delta)
+            usd_value = amount * ms.current_price
+            if usd_value < 5.0:
+                return OrderType.UNKNOWN, None
+
+            tp = self._estimate_target_price(tx_data, amount, ms)
+            predicted_mcap = self._predict_mcap(tp, ms) if tp > 0 else 0.0
+
+            ex_names = [
+                exchange_name(p) if p in EXCHANGE_REGISTRY
+                else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
+                for p in sorted(limit_hits)
+            ]
+
+            return OrderType.LIMIT_SELL, {
+                "wallet": signer,
+                "amount": amount,
+                "usd_value": usd_value,
+                "target_price": tp,
+                "predicted_mcap": predicted_mcap,
+                "exchange": ", ".join(ex_names),
+                "quote_token": "",
+            }
+
+        # ===================================================================
+        # 5) TRANSFER
+        # ===================================================================
+        non_target_changes = [
+            mint for mint, delta in deltas.items()
+            if mint != MINT and abs(delta) > 1e-12
+        ]
+        if abs(target_delta) > 1e-12 and not limit_hits and not market_hits and not non_target_changes:
+            return OrderType.TRANSFER, {
+                "wallet": signer,
+                "amount": abs(target_delta),
+                "usd_value": abs(target_delta) * ms.current_price,
+                "to": "unknown",
+                "quote_token": "",
+            }
+
+        return OrderType.UNKNOWN, None
 
     async def _groq_classify(
         self, tx_data: Dict, signer: str, ms: MarketState, signals: List[str]
@@ -2400,56 +2938,37 @@ class TransactionClassifier:
         return [k.get("pubkey") if isinstance(k, dict) else k for k in keys]
 
     def _estimate_target_price(self, tx_data: Dict, token_amount: float, ms: MarketState) -> float:
-        if token_amount <= 0:
-            return ms.current_price
+            """
+            Return a trustworthy target price only if it can be directly derived.
+            Otherwise return 0.0.
+            """
+            if token_amount <= 0:
+                return 0.0
 
-        meta = tx_data.get("meta", {})
+            meta = tx_data.get("meta", {})
 
-        # 1. Use stablecoin / WSOL output if available
-        output_mint = self._find_output_mint_from_accounts(tx_data)
-        if output_mint and output_mint != WSOL_MINT:
-            output_usd = self._token_amount_to_usd(tx_data, output_mint, ms)
-            if output_usd > 0:
-                candidate = output_usd / token_amount
-                if self._price_is_sane(candidate, ms):
-                    return candidate
+            # 1. explicit price in logs
+            for line in (meta.get("logMessages") or []):
+                for kw in ("price:", "Price:", "limit_price:", "limitPrice:"):
+                    idx = line.find(kw)
+                    if idx != -1:
+                        try:
+                            value = float(line[idx + len(kw):].split()[0].strip(",}"))
+                            if value > 0:
+                                return value
+                        except Exception:
+                            pass
 
-        # 2. Use signer-only SOL delta, not max delta across all accounts
-        keys = tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
-        signer = None
-        if keys:
-            signer = keys[0].get("pubkey") if isinstance(keys[0], dict) else keys[0]
+            # 2. if direct quote amount can be derived from stablecoins or WSOL
+            output_mint = self._find_output_mint_from_accounts(tx_data)
+            if output_mint:
+                output_usd = self._token_amount_to_usd(tx_data, output_mint, ms)
+                if output_usd > 0:
+                    candidate = output_usd / token_amount
+                    if candidate > 0:
+                        return candidate
 
-        signer_idx = None
-        if signer:
-            for i, k in enumerate(keys):
-                pub = k.get("pubkey") if isinstance(k, dict) else k
-                if pub == signer:
-                    signer_idx = i
-                    break
-
-        pre_b = meta.get("preBalances", [])
-        post_b = meta.get("postBalances", [])
-        if signer_idx is not None and signer_idx < len(pre_b) and signer_idx < len(post_b):
-            sol_spent = abs(post_b[signer_idx] - pre_b[signer_idx]) / 1e9
-            if sol_spent > 0.005 and ms.sol_price_usd > 0:
-                candidate = (sol_spent * ms.sol_price_usd) / token_amount
-                if self._price_is_sane(candidate, ms):
-                    return candidate
-
-        # 3. Parse explicit price logs
-        for line in (meta.get("logMessages") or []):
-            for kw in ("price:", "Price:", "limit_price:", "limitPrice:"):
-                idx = line.find(kw)
-                if idx != -1:
-                    try:
-                        c = float(line[idx + len(kw):].split()[0].strip(",}"))
-                        if c > 0 and self._price_is_sane(c, ms):
-                            return c
-                    except (ValueError, IndexError):
-                        pass
-
-        return ms.current_price * 0.97
+            return 0.0
 
     @staticmethod
     def _price_is_sane(price: float, ms: MarketState) -> bool:
@@ -2482,11 +3001,15 @@ class TransactionClassifier:
             return delta * ms.sol_price_usd
         return 0.0
 
-    @staticmethod
-    def _predict_mcap(target_price: float, ms: MarketState) -> float:
-        if ms.current_price > 0 and ms.current_market_cap > 0 and target_price > 0:
-            return ms.current_market_cap * (target_price / ms.current_price)
+@staticmethod
+def _predict_mcap(target_price: float, ms: MarketState) -> float:
+    if target_price <= 0:
         return 0.0
+    if ms.total_supply > 0:
+        return target_price * ms.total_supply
+    if ms.current_price > 0 and ms.current_market_cap > 0:
+        return ms.current_market_cap * (target_price / ms.current_price)
+    return 0.0
 
 
 class OrderTracker:
@@ -2617,8 +3140,8 @@ class AlertManager:
             return
         buys               = [o for o in orders if o["order_type"] == "LIMIT_BUY"]
         sells              = [o for o in orders if o["order_type"] == "LIMIT_SELL"]
-        support_lvls       = sorted(o["predicted_mcap"] for o in buys)
-        resistance_lvls    = sorted(o["predicted_mcap"] for o in sells)
+        support_lvls = sorted(o["predicted_mcap"] for o in buys if o.get("predicted_mcap", 0) > 0)
+        resistance_lvls = sorted(o["predicted_mcap"] for o in sells if o.get("predicted_mcap", 0) > 0)
         nearest_support    = support_lvls[0]    if support_lvls    else None
         nearest_resistance = resistance_lvls[0] if resistance_lvls else None
         embed: dict = {
@@ -2748,7 +3271,10 @@ def _build_limit_order_embed(order: LimitOrder, ms: MarketState,
     is_buy     = order.order_type == OrderType.LIMIT_BUY
     color      = 0x10B981 if is_buy else 0xEF4444
     direction  = "BUY" if is_buy else "SELL"
-    dist       = _pct_from_current(order.predicted_mcap, ms)
+    dist = _pct_from_current(order.predicted_mcap, ms) if order.predicted_mcap > 0 else 0.0
+    target_price_str = f"${order.target_price:.8f}" if order.target_price > 0 else "Unknown"
+    target_mcap_str = format_usd(order.predicted_mcap) if order.predicted_mcap > 0 else "Unknown"
+    distance_str = f"{dist:+.2f}% from current" if order.predicted_mcap > 0 else "Unknown"
     role       = "Support Level" if is_buy else "Resistance Level"
     pair_label = (
         f"{quote_token} → XERIS" if is_buy and quote_token
@@ -2767,9 +3293,9 @@ def _build_limit_order_embed(order: LimitOrder, ms: MarketState,
             f"Pair:         {pair_label}\n"
             f"Size:         {format_tokens(order.token_amount)} XERIS\n"
             f"Value:        {format_usd(order.usd_value)}\n"
-            f"Target Price: ${order.target_price:.8f}\n"
-            f"Target MCap:  {format_usd(order.predicted_mcap)}\n"
-            f"Distance:     {dist:+.2f}% from current\n"
+            f"Target Price: {target_price_str}\n"
+            f"Target MCap:  {target_mcap_str}\n"
+            f"Distance:     {distance_str}\n"
             f"Role:         {role}\n"
             f"Placed At:    {placed_at}\n"
             f"Expires At:   {expires_at}\n"
@@ -2802,9 +3328,21 @@ def _build_whale_embed(tx_type: str, amount: float, wallet: str, usd_value: floa
                         exchange: str = "") -> dict:
     is_buy   = tx_type == "BUY"
     color    = 0x10B981 if is_buy else 0xEF4444
-    new_mcap = ms.current_market_cap + usd_value if is_buy else max(0, ms.current_market_cap - usd_value)
-    diff     = new_mcap - ms.current_market_cap
-    impact   = (usd_value / ms.current_market_cap * 100) if ms.current_market_cap > 0 else 0
+    amm = build_amm_from_market_state(ms, fee_rate=0.0025)
+
+    if amm:
+        if is_buy:
+            proj = amm.buy_with_sol(usd_value / ms.sol_price_usd)
+        else:
+            proj = amm.sell_tokens(amount)
+
+        new_mcap = proj.new_market_cap_usd
+        diff = new_mcap - ms.current_market_cap
+        impact = proj.price_impact_pct
+    else:
+        new_mcap = ms.current_market_cap
+        diff = 0.0
+        impact = 0.0
     if usd_value >= 50_000:  tier = "💎 MEGA WHALE"
     elif usd_value >= 10_000:tier = "🌊 WHALE"
     elif usd_value >= 5_000: tier = "⭐ BIG FISH"
@@ -2846,8 +3384,15 @@ def _build_whale_embed(tx_type: str, amount: float, wallet: str, usd_value: floa
 
 def _build_dev_sell_embed(amount: float, wallet: str, usd_value: float, signature: str,
                            ms: MarketState, quote_token: str = "") -> dict:
-    new_mcap   = max(0, ms.current_market_cap - usd_value)
-    impact     = (usd_value / ms.current_market_cap * 100) if ms.current_market_cap > 0 else 0
+    amm = build_amm_from_market_state(ms, fee_rate=0.0025)
+
+    if amm:
+        proj = amm.sell_tokens(amount)
+        new_mcap = proj.new_market_cap_usd
+        impact = abs(proj.price_impact_pct)
+    else:
+        new_mcap = ms.current_market_cap
+        impact = 0.0
     pair_label = f"XERIS → {quote_token}" if quote_token else "XERIS sold"
     return {
         "author": {"name": "⚠️ DEVELOPER ACTIVITY ALERT"},
@@ -3003,6 +3548,13 @@ async def update_price(ms: MarketState) -> None:
             return
 
         new_price = float(pair.get("priceUsd") or 0)
+        base_liquidity = float((pair.get("liquidity") or {}).get("base") or 0)
+        quote_liquidity = float((pair.get("liquidity") or {}).get("quote") or 0)
+        liquidity_usd = float((pair.get("liquidity") or {}).get("usd") or 0)
+
+        ms.pool_token_reserve = base_liquidity
+        ms.pool_sol_reserve = quote_liquidity
+        ms.pool_liquidity_usd = liquidity_usd
         fdv = pair.get("fdv")
         mcap = pair.get("marketCap")
 
@@ -3023,6 +3575,8 @@ async def update_price(ms: MarketState) -> None:
 
         if ms.price_reference > 0:
             await _check_price_alert(ms)
+        if ms.total_supply <= 0 and ms.current_price > 0 and ms.current_market_cap > 0:
+            ms.total_supply = ms.current_market_cap / ms.current_price
     except Exception as e:
         print(f"❌ Price error: {e}")
 
@@ -3961,8 +4515,15 @@ async def cmd_order(channel_id: int, db: DatabaseManager, ms: MarketState) -> No
         }])
         return
 
-    buys  = sorted([o for o in orders if o["order_type"] == "LIMIT_BUY"],  key=lambda x: x["predicted_mcap"])
-    sells = sorted([o for o in orders if o["order_type"] == "LIMIT_SELL"], key=lambda x: x["predicted_mcap"])
+    buys = sorted(
+        [o for o in orders if o["order_type"] == "LIMIT_BUY"],
+        key=lambda x: (x.get("predicted_mcap", 0) <= 0, x.get("predicted_mcap", 0))
+    )
+
+    sells = sorted(
+        [o for o in orders if o["order_type"] == "LIMIT_SELL"],
+        key=lambda x: (x.get("predicted_mcap", 0) <= 0, x.get("predicted_mcap", 0))
+    )
     total_buy_wall  = sum(o["usd_value"] for o in buys)
     total_sell_wall = sum(o["usd_value"] for o in sells)
 
@@ -4510,16 +5071,16 @@ async def x_post_monitor(db: DatabaseManager) -> None:
                 continue
 
             new_posts = []
-            for post in posts:
-                if post["id"] == last_seen_id:
-                    break
-                new_posts.append(post)
+
+            if last_seen_id:
+                new_posts = [p for p in posts if _tweet_id_gt(p["id"], last_seen_id)]
+            else:
+                new_posts = posts[:1]
 
             if not new_posts:
                 continue
 
-            # oldest -> newest so Discord shows correct order
-            new_posts.reverse()
+            new_posts.sort(key=lambda p: int(p["id"]))
 
             for post in new_posts:
                 embed = _build_x_post_embed(user, post)
