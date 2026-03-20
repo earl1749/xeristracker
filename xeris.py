@@ -2657,14 +2657,11 @@ async def main() -> None:
         print(f"🧹 Startup cleanup: removed {removed} stale order(s)")
     ms = MarketState()
     
-    from x_rss_monitor import x_post_monitor as _x_rss_monitor
-
     try:
         await asyncio.gather(
             discord_gateway(),
             helius_monitor(db, ms),
             announce_startup(),
-            _x_rss_monitor(db),
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n👋 Shutting down…")
