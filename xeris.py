@@ -187,13 +187,6 @@ def build_amm_from_market_state(ms: MarketState, fee_rate: float = 0.0025) -> Op
     except Exception:
         return None
 
-def _tweet_id_gt(a: str, b: str) -> bool:
-    try:
-        return int(a) > int(b)
-    except Exception:
-        return a > b
-
-
 # ═════════════════════════════════════════════════════════════════════════════
 # Transaction helpers
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1666,43 +1659,6 @@ def _build_price_embed(pct: float, ref: float, ms: MarketState) -> dict:
         "footer": {"text": f"Threshold ±{PRICE_ALERT_THRESHOLD}% · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp()}
 
-def _extract_first_url_from_entities(post: Dict) -> Optional[str]:
-    urls = (post.get("entities") or {}).get("urls") or []
-    if urls: return urls[0].get("expanded_url") or urls[0].get("url")
-    return None
-
-def _build_x_post_embed(user: Dict, post: Dict) -> dict:
-    username    = user.get("username", "unknown")
-    display_name= user.get("name",     username)
-    verified    = user.get("verified", False)
-    text        = (post.get("text") or "").strip()
-    post_url    = f"https://x.com/{username}/status/{post['id']}"
-    linked_url  = _extract_first_url_from_entities(post)
-    metrics     = post.get("public_metrics") or {}
-    embed = {
-        "author":      {"name": f"𝕏 New Post · {display_name} {'✅' if verified else ''}".strip(), "url": f"https://x.com/{username}"},
-        "title":       f"@{username}", "url": post_url,
-        "description": text[:4000] if text else "*No text*",
-        "color":       0x111111,
-        "fields": [
-            {"name": "📊 Engagement",
-             "value": (f"```yaml\nLikes   : {metrics.get('like_count',0):,}\n"
-                       f"Reposts : {metrics.get('retweet_count',0):,}\n"
-                       f"Replies : {metrics.get('reply_count',0):,}\n```"),
-             "inline": True},
-            {"name": "🔗 Links",
-             "value": (f"[Open Post]({post_url})"
-                       + (f" · [First Link]({linked_url})" if linked_url else "")
-                       + f" · [Profile](https://x.com/{username})"),
-             "inline": True}],
-        "footer": {"text": f"X Watcher · {post.get('created_at', '')}"},
-        "timestamp": get_timestamp(),
-    }
-    if user.get("profile_image_url"):
-        embed["thumbnail"] = {"url": user["profile_image_url"]}
-    return embed
-
-
 # ═════════════════════════════════════════════════════════════════════════════
 # Price fetching
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1945,37 +1901,6 @@ Return: {{"risk_score":<0-10>,"rug_label":"<LIKELY SAFE|PROCEED WITH CAUTION|HIG
     except Exception as e:
         return {"error": str(e)}
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-# X / Twitter helpers
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def x_api_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
-    if not X_BEARER_TOKEN: return None
-    headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}", "Content-Type": "application/json", "User-Agent": "XerisBot/2.0"}
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.get(f"https://api.x.com{path}", headers=headers, params=params)
-        if r.status_code != 200: print(f"❌ X API {r.status_code}: {r.text[:200]}"); return None
-        return r.json()
-    except Exception as e:
-        print(f"❌ X API error: {e}"); return None
-
-async def x_get_user_by_username(username: str) -> Optional[Dict]:
-    data = await x_api_get(f"/2/users/by/username/{username}",
-                            params={"user.fields": "id,name,username,profile_image_url,verified"})
-    return data["data"] if data and "data" in data else None
-
-async def x_get_latest_posts(user_id: str, limit: int = 5) -> List[Dict]:
-    exclude = []
-    if not X_INCLUDE_REPLIES:  exclude.append("replies")
-    if not X_INCLUDE_RETWEETS: exclude.append("retweets")
-    params = {"max_results": min(max(limit, 5), 10),
-              "tweet.fields": "created_at,public_metrics,entities,conversation_id",
-              "expansions": "author_id", "user.fields": "name,username,profile_image_url,verified"}
-    if exclude: params["exclude"] = ",".join(exclude)
-    data = await x_api_get(f"/2/users/{user_id}/tweets", params=params)
-    return (data.get("data", []) or []) if data else []
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2521,51 +2446,6 @@ async def helius_monitor(db: DatabaseManager, ms: MarketState) -> None:
             print(f"❌ Helius error: {e} — retry in {wait}s")
             await asyncio.sleep(wait)
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-# X watcher
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def x_post_monitor(db: DatabaseManager) -> None:
-    if not X_BEARER_TOKEN or not X_USERNAME or not X_CHANNEL_ID:
-        print("ℹ️ X watcher disabled"); return
-    print(f"🐦 Starting X watcher for @{X_USERNAME} -> channel {X_CHANNEL_ID}")
-    user = await x_get_user_by_username(X_USERNAME)
-    if not user: print(f"❌ Could not resolve X user: @{X_USERNAME}"); return
-    user_id = user["id"]; username = user["username"]
-    state = await db.get_x_watch_state(username)
-    latest_posts = await x_get_latest_posts(user_id, limit=5)
-    if not latest_posts:
-        print(f"⚠️ No posts found for @{username}")
-        while True:
-            await asyncio.sleep(X_POLL_SECONDS)
-            latest_posts = await x_get_latest_posts(user_id, limit=5)
-            if latest_posts: break
-    if not state:
-        newest = latest_posts[0]
-        await db.upsert_x_watch_state(username, user_id, newest["id"], newest.get("created_at", ""))
-        print(f"✅ X watcher initialized for @{username}")
-    else:
-        print(f"✅ X watcher resumed for @{username}")
-    while True:
-        try:
-            await asyncio.sleep(X_POLL_SECONDS)
-            state = await db.get_x_watch_state(username)
-            last_seen_id = (state or {}).get("last_post_id", "")
-            posts = await x_get_latest_posts(user_id, limit=10)
-            if not posts: continue
-            new_posts = [p for p in posts if _tweet_id_gt(p["id"], last_seen_id)] if last_seen_id else posts[:1]
-            if not new_posts: continue
-            new_posts.sort(key=lambda p: int(p["id"]))
-            for post in new_posts:
-                await send_message(X_CHANNEL_ID, embeds=[_build_x_post_embed(user, post)])
-                print(f"🐦 New X post sent: @{username} -> {post['id']}")
-            newest = posts[0]
-            await db.upsert_x_watch_state(username, user_id, newest["id"], newest.get("created_at", ""))
-        except Exception as e:
-            print(f"❌ X watcher error: {e}"); await asyncio.sleep(10)
-
-
 # ═════════════════════════════════════════════════════════════════════════════
 # Startup announcement
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2626,7 +2506,6 @@ async def main() -> None:
             discord_gateway(),
             helius_monitor(db, ms),
             announce_startup(),
-            x_post_monitor(db),
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n👋 Shutting down…")
