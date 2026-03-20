@@ -37,8 +37,6 @@ from config.settings import (
     ORDER_TTL_HOURS, ORDER_TTL_SECS, PRICE_ALERT_COOLDOWN, PRICE_ALERT_THRESHOLD,
     PRICE_UPDATE_INTERVAL, RPC_URL, SUMMARY_ALERT_INTERVAL, SUSPICION_THRESHOLD,
     VALID_CA, WHALE_MIN_USD, WS_URL, WSOL_MINT,
-    X_BEARER_TOKEN, X_CHANNEL_ID, X_INCLUDE_REPLIES, X_INCLUDE_RETWEETS,
-    X_POLL_SECONDS, X_USERNAME,
 )
 from config.data_registy import (
     ALL_KNOWN_PROGRAMS, ALL_SWAP_PROGRAMS, AGGREGATOR_PROGRAMS,
@@ -2506,6 +2504,7 @@ async def main() -> None:
             discord_gateway(),
             helius_monitor(db, ms),
             announce_startup(),
+            _x_rss_monitor(db),
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n👋 Shutting down…")
