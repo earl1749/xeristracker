@@ -1830,9 +1830,15 @@ async def update_price(ms: MarketState) -> None:
         ms.pool_token_reserve = float(liq.get("base") or 0)
         ms.pool_sol_reserve   = float(liq.get("quote") or 0)
         ms.pool_liquidity_usd = float(liq.get("usd")   or 0)
-        fdv  = pair.get("fdv"); mcap = pair.get("marketCap")
-        if fdv:    ms.current_market_cap = float(fdv)
-        elif mcap: ms.current_market_cap = float(mcap)
+        fdv  = pair.get("fdv")
+        mcap = pair.get("marketCap")
+        
+        if mcap:
+            ms.current_market_cap = float(mcap)
+        elif fdv:
+            ms.current_market_cap = float(fdv)
+        else:
+            ms.current_market_cap = 0.0
         elif new_price > 0: ms.current_market_cap = float(liq.get("usd") or 0) * 2
         if ms.price_reference == 0.0 and new_price > 0: ms.price_reference = new_price
         ms.current_price = new_price; ms.last_price_update = time.time()
