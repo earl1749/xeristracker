@@ -1,175 +1,210 @@
-# XerisCoin Whale & Price Monitor
+# 🚀 XerisTracker — Solana Token Monitor Bot
 
-Real-time Solana token monitoring bot that tracks whale trades, dev wallet activity, and price movements with beautiful Discord notifications.
-
-## Features
-
-🐋 **Whale Tracking** - Alerts for large trades (configurable threshold)  
-🚨 **Dev Wallet Monitor** - Special alerts when dev wallet sells  
-📈 **Price Alerts** - Notifications for ±5% price movements  
-💰 **Market Cap Tracking** - Shows before/after market cap for every trade  
-🎨 **Beautiful Discord Embeds** - Clean, elegant notifications with all key data
+A real-time Discord bot that monitors a Solana token for whale trades, limit orders, dev wallet activity, price alerts, and X (Twitter) posts. Powered by Helius WebSocket, DexScreener, GeckoTerminal, and Groq AI.
 
 ---
 
-## Deploy to Railway
+## ✨ Features
 
-### Step 1: Create a Railway Account
-1. Go to [railway.app](https://railway.app)
-2. Sign up with GitHub (recommended)
-
-### Step 2: Create a New Project
-1. Click "New Project"
-2. Select "Deploy from GitHub repo"
-3. Connect your GitHub account if not already connected
-4. Select the repository containing these files
-
-### Step 3: Configure Environment Variables (Optional)
-If you want to customize settings without editing the code, you can set these in Railway:
-
-- `MINT` - Token mint address (default: 9ezFthWrDUpSSeMdpLW6SDD9TJigHdc4AuQ5QN5bpump)
-- `HELIUS_API_KEY` - Your Helius API key
-- `DISCORD_WEBHOOK` - Your Discord webhook URL
-- `DEV_WALLET` - Developer wallet address to monitor
-- `WHALE_MIN_USD` - Minimum USD value for whale alerts (default: 10)
-- `PRICE_ALERT_THRESHOLD` - Price change % to trigger alert (default: 5.0)
-- `PRICE_ALERT_COOLDOWN` - Seconds between same-direction alerts (default: 300)
-
-**Note:** The current code has these values hardcoded. If you want to use environment variables instead, see the section below.
-
-### Step 4: Deploy
-1. Railway will automatically detect the Python app
-2. It will install dependencies from `requirements.txt`
-3. It will start the bot using the command in `Procfile`
-4. Check the logs to confirm it's running
-
-### Step 5: Monitor Logs
-- Click on your deployment in Railway
-- Go to "Deployments" tab
-- Click "View Logs" to see real-time output
-- You should see: "✅ Discord webhook OK!" and "✅ WebSocket connected"
+| Feature | Description |
+|---|---|
+| 🐋 **Whale Alerts** | Notifies when buys/sells exceed your USD threshold |
+| 🚨 **Dev Wallet Monitor** | Instant alert on any dev wallet sell |
+| 📋 **Limit Order Tracker** | Detects & tracks limit buys/sells as support/resistance levels |
+| ⚡ **Price Alerts** | Fires when price moves ±5% from reference (configurable) |
+| 📊 **Live Charts** | Candlestick charts via GeckoTerminal (1m, 5m, 15m, 1h, 1d) |
+| 🛡️ **AI Risk Analysis** | Full rug-pull risk report via Groq LLaMA-3 |
+| 🐦 **X/Twitter Watcher** | Polls a Twitter account and posts new tweets to Discord |
+| 🤖 **Auto-Learn** | Learns unknown DEX programs over time |
 
 ---
 
-## Using Environment Variables (Optional)
+## 📁 Project Structure
 
-To make your bot configurable via Railway environment variables, add this code to the top of `whale_monitor.py` after the imports:
-
-```python
-import os
-
-# Configuration from environment variables (with fallbacks)
-MINT = os.getenv("MINT", "9ezFthWrDUpSSeMdpLW6SDD9TJigHdc4AuQ5QN5bpump")
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "ce0e621e-16d6-41fc-b936-523b06754d3d")
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK", "your-webhook-here")
-DEV_WALLET = os.getenv("DEV_WALLET", "6XjutcUVEidzb3o1yXLYGC2ZSnjde2YvAUF9CiPVqxwm")
-WHALE_MIN_USD = int(os.getenv("WHALE_MIN_USD", "10"))
-PRICE_ALERT_THRESHOLD = float(os.getenv("PRICE_ALERT_THRESHOLD", "5.0"))
-PRICE_ALERT_COOLDOWN = int(os.getenv("PRICE_ALERT_COOLDOWN", "300"))
 ```
-
-Then remove the hardcoded values at the top of the file.
-
----
-
-## Get Your Discord Webhook
-
-1. Open Discord and go to your server
-2. Go to Server Settings → Integrations → Webhooks
-3. Click "New Webhook"
-4. Choose the channel where you want alerts
-5. Copy the webhook URL
-6. Paste it in the code or set it as an environment variable in Railway
-
----
-
-## Get a Helius API Key (Free)
-
-1. Go to [helius.dev](https://www.helius.dev/)
-2. Sign up for a free account
-3. Create a new API key
-4. Copy the API key
-5. Paste it in the code or set it as `HELIUS_API_KEY` in Railway
-
----
-
-## Customization
-
-Edit these values in `whale_monitor.py`:
-
-```python
-WHALE_MIN_USD = 10              # Minimum USD for whale alerts
-PRICE_ALERT_THRESHOLD = 5.0     # % change to trigger price alert
-PRICE_ALERT_COOLDOWN = 300      # Seconds between alerts (5 min)
-PRICE_UPDATE_INTERVAL = 30      # How often to fetch price (seconds)
+XERISTRACKER/
+├── app.py                        ← Entry point (run this)
+├── xeris.py                      ← Main bot logic
+├── requirements.txt
+├── Procfile                      ← Railway / Heroku deploy
+├── railway.toml                  ← Railway config
+│
+├── config/
+│   ├── settings.py               ← All env vars & constants
+│   └── data_registy.py           ← Program registry & token sets
+│
+├── core/
+│   ├── models.py                 ← Dataclasses (LimitOrder, MarketState, etc.)
+│   └── amm.py                    ← ConstantProductAMM price impact math
+│
+├── utils/
+│   └── json_loader.py            ← .env loader, JSON helpers
+│
+├── data/
+│   ├── programs.json             ← Known DEX / limit-order program IDs ← ADD THIS
+│   ├── tokens.json               ← Known token labels (SOL, USDC, etc.)
+│   ├── discriminators.json       ← Instruction discriminators
+│   └── system_programs.json      ← System program addresses
+│
+└── runtime/                      ← Auto-created on first run
+    ├── limit_orders.db           ← SQLite order tracker
+    ├── learned_programs.json     ← Auto-learned DEX programs
+    └── unknown_programs.jsonl    ← Unknown program log
 ```
 
 ---
 
-## Alert Types
+## ⚙️ Environment Variables
 
-### 🐋 Whale Alert
-- Triggers when a trade exceeds `WHALE_MIN_USD`
-- Shows: trade size, impact %, price, market cap change
-- Color: Green for buys, Red for sells
-- Size labels: 🔴 MEGA WHALE ($50K+), 🟠 WHALE ($10K+), 🟡 BIG FISH ($5K+), 🔵 FISH
+### Required
 
-### 🚨 Dev Sell Alert
-- Triggers when `DEV_WALLET` sells any amount
-- Shows: sell amount, price, market cap impact
-- Links to transaction and wallet for verification
+| Variable | Description |
+|---|---|
+| `HELIUS_API_KEY` | Helius RPC/WebSocket API key — [helius.dev](https://helius.dev) |
+| `DISCORD_TOKEN` | Discord bot token — [discord.com/developers](https://discord.com/developers/applications) |
+| `DISCORD_CHANNEL` | Channel ID where whale/limit/price alerts are posted |
+| `GROQ_API_KEY` | Groq API key for AI classification — [console.groq.com](https://console.groq.com) |
 
-### 📈 Price Alert
-- Triggers when price moves ±5% (or your custom threshold)
-- Shows: old/new price, % change, market cap impact
-- Intensity: 🔥 EXTREME (15%+), ⚡ STRONG (10%+), 📈 NOTABLE (7%+), 📶 MODERATE (5%+)
-- Has 5-minute cooldown per direction to prevent spam
+### Recommended
 
----
+| Variable | Default | Description |
+|---|---|---|
+| `MINT` | *(hardcoded)* | Contract address of the token to monitor |
+| `DEV_WALLET` | *(hardcoded)* | Dev wallet address to watch for sells |
+| `WHALE_MIN_USD` | `500` | Minimum USD value to trigger a whale alert |
 
-## Troubleshooting
+### Optional
 
-**Bot not connecting:**
-- Check Railway logs for errors
-- Verify Helius API key is valid
-- Make sure Discord webhook URL is correct
+| Variable | Default | Description |
+|---|---|---|
+| `DEBUG_CHANNEL_ID` | *(off)* | Channel for unknown program debug alerts |
+| `DB_PATH` | `runtime/limit_orders.db` | SQLite database path |
+| `PROGRAMS_FILE` | `data/programs.json` | Path to known programs registry |
+| `LEARNED_PROGRAMS_FILE` | `runtime/learned_programs.json` | Auto-learn output path |
+| `CHART_COOLDOWN_SECONDS` | `15` | Seconds between chart requests per channel |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model for TX classification & risk analysis |
 
-**Not receiving alerts:**
-- Check Discord webhook channel permissions
-- Verify `WHALE_MIN_USD` threshold isn't too high
-- Check Railway logs to see if transactions are being detected
+### X / Twitter Watcher (Optional)
 
-**WebSocket disconnects:**
-- Normal behavior - bot will auto-reconnect
-- Uses exponential backoff (30s, 60s, 90s, up to 5min)
-
-**High API usage:**
-- Adjust `PRICE_UPDATE_INTERVAL` to fetch less frequently
-- Free Helius tier should be sufficient for one token
-
----
-
-## Files in This Project
-
-- `whale_monitor.py` - Main bot code
-- `requirements.txt` - Python dependencies
-- `Procfile` - Tells Railway how to run the app
-- `railway.json` - Railway configuration
-- `runtime.txt` - Python version specification
-- `README.md` - This file
+| Variable | Default | Description |
+|---|---|---|
+| `X_BEARER_TOKEN` | *(off)* | Twitter API v2 Bearer Token |
+| `X_USERNAME` | *(off)* | Twitter handle to watch (without `@`) |
+| `X_CHANNEL_ID` | *(off)* | Discord channel ID to post tweets to |
+| `X_POLL_SECONDS` | `60` | How often to check for new tweets |
+| `X_INCLUDE_REPLIES` | `false` | Include replies in the feed |
+| `X_INCLUDE_RETWEETS` | `false` | Include retweets in the feed |
 
 ---
 
-## Support
+## 🏃 Running Locally
 
-If you encounter issues:
-1. Check Railway deployment logs
-2. Verify all API keys and webhooks are correct
-3. Make sure the token mint address is valid
-4. Test Discord webhook with a simple curl command
+**1. Clone / download the project**
+
+**2. Install dependencies**
+```bash
+pip install -r requirements.txt
+```
+
+**3. Create your `.env` file**
+```env
+HELIUS_API_KEY=your_helius_key
+DISCORD_TOKEN=your_discord_bot_token
+DISCORD_CHANNEL=123456789012345678
+GROQ_API_KEY=your_groq_key
+MINT=YourTokenContractAddress
+DEV_WALLET=DevWalletAddress
+WHALE_MIN_USD=500
+```
+
+**4. Run**
+```bash
+python app.py
+```
 
 ---
 
-## License
+## 🚂 Deploying to Railway
 
-MIT - Use freely, modify as needed!
+**1.** Push your project to a GitHub repository
+
+**2.** Go to [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo**
+
+**3.** Add all environment variables in Railway dashboard → your service → **Variables**
+
+**4.** Railway auto-detects Python, installs `requirements.txt`, and starts with `python app.py`
+
+### ⚠️ Persistent Database (Important!)
+
+Railway's filesystem resets on every redeploy. To keep your limit order history:
+
+- Railway dashboard → your service → **Volumes** → **Add Volume**
+- Mount path: `/app/runtime`
+- Add env var: `DB_PATH=/app/runtime/limit_orders.db`
+
+---
+
+## 💬 Discord Commands
+
+All commands use the `!` prefix in any channel the bot can read.
+
+| Command | Description |
+|---|---|
+| `!price <CA>` | Price, market cap, 24h volume & change |
+| `!whale <CA>` | Top 15 holders with concentration risk bar |
+| `!chart <CA> [tf]` | Live candlestick chart — timeframes: `1m` `5m` `15m` `1h` `1d` |
+| `!analyze <CA>` | Full AI risk analysis (rug score, red flags, trade advice) |
+| `!order` | Live limit order book — support & resistance levels |
+| `!help` | Show all commands |
+
+---
+
+## 🔍 How Transaction Classification Works
+
+When a transaction involving your token is detected via Helius WebSocket, the bot runs it through a 3-stage classifier:
+
+```
+Stage 1 — Rule-based
+  Checks program IDs against data/programs.json
+  Reads token balance changes & instruction discriminators
+  → Fast, no API cost
+
+Stage 2 — Suspicion scorer
+  Scores the tx on 8+ signals (unknown programs, account count, inner instructions, etc.)
+  Only proceeds to Stage 3 if score ≥ threshold
+
+Stage 3 — Groq AI (if enabled)
+  Sends structured tx facts to Groq LLaMA-3
+  Returns: order_type, confidence, exchange, size_usd
+  → Auto-learns new program IDs with high confidence
+```
+
+**Order types detected:** `MARKET_BUY`, `MARKET_SELL`, `LIMIT_BUY`, `LIMIT_SELL`, `CANCEL_LIMIT`, `TRANSFER`
+
+---
+
+## 📦 Adding New DEX Programs
+
+Edit `data/programs.json` and add an entry under `known_programs`:
+
+```json
+"ProgramAddressHere11111111111111111111111111": {
+  "name": "My DEX",
+  "role": "market"
+}
+```
+
+Roles: `market` (spot swaps), `limit` (limit/DCA orders), `hybrid` (both)
+
+Also add the address to `swap_programs` or `aggregator_programs` as appropriate.
+
+The bot will also auto-learn unknown programs over time — check `runtime/learned_programs.json` after it runs for a while.
+
+---
+
+## 📝 Notes
+
+- The bot runs as a **worker** (no HTTP server needed), making it ideal for Railway's worker deployments
+- Groq AI is used for **both** transaction classification and the `!analyze` risk report command
+- Chart images are generated with `matplotlib` — no external chart service required
+- All Discord communication is done via raw Gateway WebSocket + REST API (no `discord.py` dependency)
