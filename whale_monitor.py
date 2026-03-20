@@ -368,7 +368,7 @@ def get_signer_token_deltas(tx_data: Dict, signer: str) -> Dict[str, float]:
 
     return dict(deltas)
 
-def build_amm_from_market_state(ms: MarketState, fee_rate: float = 0.0025) -> Optional[ConstantProductAMM]:
+def build_amm_from_market_state(ms: MarketState, fee_rate: float = 0.0025) -> Optional["ConstantProductAMM"]:
     if (
         ms.pool_token_reserve <= 0
         or ms.pool_sol_reserve <= 0
