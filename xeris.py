@@ -293,68 +293,225 @@ def init_discord_queue() -> None:
 async def _discord_request(method: str, path: str, **kwargs):
     headers = {
         "Authorization": f"Bot {DISCORD_TOKEN}",
-        "Content-Type":  "application/json",
-        "User-Agent":    "XerisBot/2.0",
+        "Content-Type": "application/json",
+        "User-Agent": "XerisBot/2.0",
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        return await client.request(method, f"{DISCORD_API}{path}", headers=headers, **kwargs)
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        return await client.request(
+            method,
+            f"{DISCORD_API}{path}",
+            headers=headers,
+            **kwargs,
+        )
 
-async def _send_message_direct(channel_id: int, payload: dict) -> bool:
-    r = await _discord_request("POST", f"/channels/{channel_id}/messages", json=payload)
-    if r.status_code not in (200, 201):
-        print(f"   ❌ Discord {r.status_code}: {r.text[:150]}")
-        return False
-    print("   ✅ Message sent")
-    return True
 
-async def send_message(channel_id: int, content: str = None,
-                        embeds: list = None, mention_everyone: bool = False) -> None:
+async def _send_message_direct(channel_id: int, payload: dict, max_retries: int = 5) -> bool:
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = await _discord_request(
+                "POST",
+                f"/channels/{channel_id}/messages",
+                json=payload,
+            )
+
+            if r.status_code in (200, 201):
+                print("   ✅ Message sent")
+                return True
+
+            if r.status_code == 429:
+                retry_after = 2.0
+                try:
+                    data = r.json()
+                    retry_after = float(data.get("retry_after", retry_after))
+                    global_rl = bool(data.get("global", False))
+                    print(
+                        f"   ⚠️ Discord 429 rate limit "
+                        f"(global={global_rl}) retry_after={retry_after:.2f}s"
+                    )
+                except Exception:
+                    text_preview = (r.text or "")[:200].replace("\n", " ")
+                    print(f"   ⚠️ Discord 429 non-JSON response: {text_preview}")
+
+                await asyncio.sleep(retry_after + 0.25)
+                continue
+
+            text_preview = (r.text or "")[:200].replace("\n", " ")
+            print(f"   ❌ Discord {r.status_code}: {text_preview}")
+            return False
+
+        except Exception as e:
+            print(f"   ❌ Discord send error (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(min(2 * attempt, 5))
+
+    print("   ❌ Message send failed after retries")
+    return False
+
+
+async def send_message(
+    channel_id: int,
+    content: str = None,
+    embeds: list = None,
+    mention_everyone: bool = False,
+) -> bool:
     payload: dict = {}
-    if content or mention_everyone:
-        payload["content"] = ("@everyone " if mention_everyone else "") + (content or "")
+
+    parts = []
+    if mention_everyone:
+        parts.append("@everyone")
+    if content:
+        cleaned = content.strip()
+        if cleaned:
+            parts.append(cleaned)
+
+    if parts:
+        payload["content"] = " ".join(parts)
+
     if embeds:
         payload["embeds"] = embeds
+
+    if not payload:
+        print("   ⚠️ send_message skipped: empty payload")
+        return False
+
     if _discord_queue:
         await _discord_queue.enqueue(channel_id, payload)
-    else:
-        await _send_message_direct(channel_id, payload)
+        return True
+
+    return await _send_message_direct(channel_id, payload)
+
 
 async def send_typing(channel_id: int) -> None:
-    await _discord_request("POST", f"/channels/{channel_id}/typing")
+    try:
+        r = await _discord_request("POST", f"/channels/{channel_id}/typing")
+        if r.status_code not in (200, 204):
+            print(f"   ⚠️ Typing failed: {r.status_code} {(r.text or '')[:120]}")
+    except Exception as e:
+        print(f"   ⚠️ Typing error: {e}")
+
 
 async def delete_message(channel_id: int, message_id: int) -> bool:
-    r = await _discord_request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
-    return r.status_code in (200, 204)
+    try:
+        r = await _discord_request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
 
-async def send_message_get_id(channel_id: int, content: str = None,
-                               embeds: list = None, mention_everyone: bool = False) -> Optional[int]:
+        if r.status_code in (200, 204):
+            return True
+
+        if r.status_code == 429:
+            retry_after = 2.0
+            try:
+                data = r.json()
+                retry_after = float(data.get("retry_after", retry_after))
+            except Exception:
+                pass
+
+            await asyncio.sleep(retry_after + 0.25)
+            r = await _discord_request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
+            return r.status_code in (200, 204)
+
+        print(f"   ⚠️ Delete failed: {r.status_code} {(r.text or '')[:150]}")
+        return False
+
+    except Exception as e:
+        print(f"   ⚠️ Delete error: {e}")
+        return False
+
+
+async def send_message_get_id(
+    channel_id: int,
+    content: str = None,
+    embeds: list = None,
+    mention_everyone: bool = False,
+    max_retries: int = 5,
+) -> Optional[int]:
     payload: dict = {}
-    if content or mention_everyone:
-        payload["content"] = ("@everyone " if mention_everyone else "") + (content or "")
+
+    parts = []
+    if mention_everyone:
+        parts.append("@everyone")
+    if content:
+        cleaned = content.strip()
+        if cleaned:
+            parts.append(cleaned)
+
+    if parts:
+        payload["content"] = " ".join(parts)
+
     if embeds:
         payload["embeds"] = embeds
-    r = await _discord_request("POST", f"/channels/{channel_id}/messages", json=payload)
-    if r.status_code not in (200, 201):
-        print(f"   ❌ Discord {r.status_code}: {r.text[:150]}")
-        return None
-    try:
-        return int(r.json()["id"])
-    except Exception:
+
+    if not payload:
+        print("   ⚠️ send_message_get_id skipped: empty payload")
         return None
 
-async def send_temp_message(channel_id: int, content: str = None,
-                             embeds: list = None, delete_after: int = 8) -> None:
-    msg_id = await send_message_get_id(channel_id, content=content, embeds=embeds)
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = await _discord_request(
+                "POST",
+                f"/channels/{channel_id}/messages",
+                json=payload,
+            )
+
+            if r.status_code in (200, 201):
+                try:
+                    return int(r.json()["id"])
+                except Exception:
+                    print("   ⚠️ Message sent but failed to parse message ID")
+                    return None
+
+            if r.status_code == 429:
+                retry_after = 2.0
+                try:
+                    data = r.json()
+                    retry_after = float(data.get("retry_after", retry_after))
+                    global_rl = bool(data.get("global", False))
+                    print(
+                        f"   ⚠️ Discord 429 rate limit "
+                        f"(global={global_rl}) retry_after={retry_after:.2f}s"
+                    )
+                except Exception:
+                    text_preview = (r.text or "")[:200].replace("\n", " ")
+                    print(f"   ⚠️ Discord 429 non-JSON response: {text_preview}")
+
+                await asyncio.sleep(retry_after + 0.25)
+                continue
+
+            print(f"   ❌ Discord {r.status_code}: {(r.text or '')[:150]}")
+            return None
+
+        except Exception as e:
+            print(f"   ❌ Discord send_get_id error (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(min(2 * attempt, 5))
+
+    print("   ❌ send_message_get_id failed after retries")
+    return None
+
+
+async def send_temp_message(
+    channel_id: int,
+    content: str = None,
+    embeds: list = None,
+    delete_after: int = 8,
+    mention_everyone: bool = False,
+) -> None:
+    msg_id = await send_message_get_id(
+        channel_id,
+        content=content,
+        embeds=embeds,
+        mention_everyone=mention_everyone,
+    )
     if not msg_id:
         return
+
     async def _auto_delete():
         try:
             await asyncio.sleep(delete_after)
             await delete_message(channel_id, msg_id)
         except Exception as e:
             print(f"⚠️ Temp delete error: {e}")
-    asyncio.create_task(_auto_delete())
 
+    asyncio.create_task(_auto_delete())
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Database
