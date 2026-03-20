@@ -37,7 +37,7 @@ for _name, _val in [
     if not _val:
         raise ValueError(f"❌  {_name} environment variable is required!")
 
-ALERT_CHANNEL_ID = int(DISCORD_CHANNEL)
+
 DEBUG_CHANNEL_ID = int(DEBUG_CHANNEL) if DEBUG_CHANNEL and DEBUG_CHANNEL != "0" else None
 
 # ── X / Twitter ──────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ PRICE_ALERT_COOLDOWN   = 300        # seconds
 CLEANUP_INTERVAL       = 3600       # seconds between DB cleanups
 ORDER_TTL_HOURS        = 168        # 7 days
 ORDER_TTL_SECS         = ORDER_TTL_HOURS * 3600
-ALERT_CHANNEL_ID       = 1483822900795670678
+ALERT_CHANNEL_ID       = int(DISCORD_CHANNEL)
 
 CHART_COOLDOWN_SECONDS           = int(os.getenv("CHART_COOLDOWN_SECONDS", "15"))
 CHART_WAIT_MESSAGE_DELETE_SECONDS = int(os.getenv("CHART_WAIT_DELETE_SECONDS", "8"))
