@@ -1,20 +1,3 @@
-"""
-x_rss_monitor.py  —  KOL Twitter watcher for XerisTracker.
-
-Polls a KOL's Twitter/X account via RSS and forwards new posts
-to a Discord channel with @everyone ping.
-
-REQUIRED .env / Railway Variables:
-  X_USERNAME        = KOLusername        (no @)
-  X_CHANNEL_ID      = 123456789012345678 (Discord channel ID)
-
-OPTIONAL:
-  X_POLL_SECONDS    = 120                (default: 2 min)
-  X_INCLUDE_REPLIES = false
-  X_INCLUDE_RETWEETS = false
-  RSSHUB_URL        = https://your-rsshub.up.railway.app  (self-hosted)
-"""
-
 from __future__ import annotations
 
 import asyncio
