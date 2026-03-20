@@ -25,7 +25,6 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 import websockets
-from x_rss_monitor import x_post_monitor as _x_rss_monitor
 
 matplotlib.use("Agg")
 
@@ -2500,6 +2499,8 @@ async def main() -> None:
     if removed:
         print(f"🧹 Startup cleanup: removed {removed} stale order(s)")
     ms = MarketState()
+    
+from x_rss_monitor import x_post_monitor as _x_rss_monitor
 
     try:
         await asyncio.gather(
