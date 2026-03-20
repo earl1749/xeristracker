@@ -1,9 +1,3 @@
-"""
-XerisBot — main bot logic.
-
-All heavy lifting lives here; thin configuration/data modules are imported
-from config/, core/, and utils/.
-"""
 
 from __future__ import annotations
 
