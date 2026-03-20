@@ -1,1 +1,1 @@
-worker: python whale_monitor.py
+worker: python app.py
