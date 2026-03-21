@@ -10,7 +10,7 @@ import time
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
-from core.x_rss_monitor import x_post_monitor
+from x_rss_monitor import x_post_monitor
 import httpx
 import matplotlib
 import matplotlib.pyplot as plt
