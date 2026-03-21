@@ -21,7 +21,7 @@ from config.settings import (
 
 # ── RSS sources ───────────────────────────────────────────────────────────────
 
-_RSSHUB_SELF = _os.getenv("RSSHUB_URL", "").rstrip("/")
+_RSSHUB_SELF = _os.getenv("RSSHUB_URL", "rsshub-production-69fe.up.railway.app").rstrip("/")
 
 _RSS_SOURCES = [
     *([f"{_RSSHUB_SELF}/twitter/user/{{username}}"] if _RSSHUB_SELF else []),
