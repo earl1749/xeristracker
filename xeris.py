@@ -6,7 +6,7 @@ from config/, core/, and utils/.
 """
 
 from __future__ import annotations
-
+from x_rss_monitor import x_post_monitor
 import asyncio
 import base64
 import io
@@ -2694,6 +2694,7 @@ async def main() -> None:
         await asyncio.gather(
             discord_gateway(),
             helius_monitor(db, ms),
+            x_post_monitor(db),
             announce_startup(),
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
