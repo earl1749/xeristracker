@@ -17,7 +17,7 @@ import time
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
-
+from x_rss_monitor import x_post_monitor
 import httpx
 import matplotlib
 import matplotlib.pyplot as plt
@@ -2721,6 +2721,7 @@ async def main() -> None:
         await asyncio.gather(
             discord_gateway(),
             helius_monitor(db, ms),
+            x_post_monitor(db),
             announce_startup(),
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
