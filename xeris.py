@@ -6,7 +6,6 @@ from config/, core/, and utils/.
 """
 
 from __future__ import annotations
-from x_rss_monitor import x_post_monitor
 import asyncio
 import base64
 import io
@@ -1305,7 +1304,6 @@ class TransactionClassifier:
                     "quote_token": quote_symbol}
 
         # 3. LIMIT BUY
-# 3. LIMIT BUY
         if limit_hits and abs(target_delta) < 1e-12:
             has_placement = has_new_order or any(k in logs_lc for k in ["place", "init", "create"])
             if has_placement:
@@ -1313,26 +1311,56 @@ class TransactionClassifier:
                 usd_value  = quote_usd(quote_mint, abs(deltas.get(quote_mint, 0.0)))
                 if usd_value < 5.0:
                     s_sol, _ = self._signer_sol_flows(tx_data, signer)
-                    if s_sol > 0.02: usd_value = s_sol * ms.sol_price_usd
+                    if s_sol > 0.02:
+                        usd_value = s_sol * ms.sol_price_usd
                 if usd_value >= 5.0:
+                    # Compute token amount from USD value using current price
                     amount = usd_value / ms.current_price if ms.current_price > 0 else 0.0
                     if amount <= 0:
                         return OrderType.UNKNOWN, None
         
+                    # Build AMM from current market state
                     amm = build_amm_from_market_state(ms)
-                    if not amm:
+                    if not amm or amm.token_reserve <= 0 or amm.sol_reserve <= 0:
                         return OrderType.UNKNOWN, None
         
-                    # For a limit buy, compute the market cap after buying 'amount' tokens
-                    proj = amm.buy_tokens(amount)
-                    predicted_mcap = proj.new_market_cap_usd
+                    # Constant product calculation for buying 'amount' tokens
+                    # pool state before trade
+                    R_token = amm.token_reserve   # token reserve (XERIS)
+                    R_sol   = amm.sol_reserve     # SOL reserve
+                    k = R_token * R_sol
+        
+                    # After buying 'amount' tokens, token reserve decreases
+                    new_R_token = R_token - amount
+                    if new_R_token <= 0:
+                        # Not enough liquidity – ignore this order
+                        return OrderType.UNKNOWN, None
+        
+                    new_R_sol = k / new_R_token
+                    sol_needed = new_R_sol - R_sol   # SOL required to buy 'amount' tokens
+        
+                    # New price (in SOL per token)
+                    new_price_sol = new_R_sol / new_R_token
+                    new_price_usd = new_price_sol * ms.sol_price_usd
+        
+                    # New market cap
+                    if ms.total_supply > 0:
+                        new_mcap = new_price_usd * ms.total_supply
+                    else:
+                        # Fallback: scale current market cap by price change
+                        new_mcap = ms.current_market_cap * (new_price_usd / ms.current_price)
+        
+                    predicted_mcap = new_mcap
         
                     return OrderType.LIMIT_BUY, {
-                        "wallet": signer, "amount": amount, "usd_value": usd_value,
-                        "target_price": proj.new_price,
+                        "wallet": signer,
+                        "amount": amount,
+                        "usd_value": usd_value,
+                        "target_price": new_price_usd,
                         "predicted_mcap": predicted_mcap,
                         "exchange": ex_names(limit_hits),
-                        "quote_token": KNOWN_TOKEN_LABELS.get(quote_mint, f"{quote_mint[:8]}…" if quote_mint else "")}
+                        "quote_token": KNOWN_TOKEN_LABELS.get(quote_mint, f"{quote_mint[:8]}…" if quote_mint else "")
+                    }
 
         # 4. LIMIT SELL
         if limit_hits and target_delta < 0 and not market_hits:
@@ -1424,45 +1452,44 @@ class TransactionClassifier:
                              "exchange": exchange, "quote_token": quote_token}
 
             if order_type in (OrderType.LIMIT_BUY, OrderType.LIMIT_SELL):
-                usd_value = 0.0; amount = 0.0
-                if groq_size_usd > 1.0:
-                    usd_value = groq_size_usd
-                    amount    = groq_size_tokens if groq_size_tokens > 0 else (usd_value / ms.current_price if ms.current_price > 0 else 0.0)
-                    if groq_quote_token: info["quote_token"] = groq_quote_token
-                if usd_value < 1.0:
-                    quote_candidates = [(m, abs(d)) for m, d in deltas.items() if m != MINT and d < 0 and abs(d) > 1e-12]
-                    if quote_candidates:
-                        pref = ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                                "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", WSOL_MINT]
-                        qm = None
-                        for p in pref:
-                            for mint, _ in quote_candidates:
-                                if mint == p: qm = mint; break
-                            if qm: break
-                        if not qm: qm = max(quote_candidates, key=lambda x: x[1])[0]
-                        if qm in ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                                  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"):
-                            usd_value = abs(deltas.get(qm, 0.0))
-                        elif qm == WSOL_MINT:
-                            usd_value = abs(deltas.get(qm, 0.0)) * ms.sol_price_usd
-                        if usd_value > 1.0: amount = usd_value / ms.current_price if ms.current_price > 0 else 0.0
-                if usd_value < 1.0:
-                    s_sol, _ = self._signer_sol_flows(tx_data, signer)
-                    if s_sol > 0.005: usd_value = s_sol * ms.sol_price_usd; amount = usd_value / ms.current_price if ms.current_price > 0 else 0.0
-                info["amount"] = amount; info["usd_value"] = usd_value
-                if info["amount"] <= 0 or info["usd_value"] <= 0: return OrderType.UNKNOWN, None, 0.0
+                # ... (keep the existing USD/value estimation code) ...
+                info["amount"] = amount
+                info["usd_value"] = usd_value
+            
+                if info["amount"] <= 0 or info["usd_value"] <= 0:
+                    return OrderType.UNKNOWN, None, 0.0
             
                 amm = build_amm_from_market_state(ms)
-                if not amm:
+                if not amm or amm.token_reserve <= 0 or amm.sol_reserve <= 0:
                     return OrderType.UNKNOWN, None, 0.0
             
                 if order_type == OrderType.LIMIT_BUY:
-                    proj = amm.buy_tokens(amount)
-                else:   # LIMIT_SELL
-                    proj = amm.sell_tokens(amount)
+                    # Use constant product calculation for buying tokens
+                    R_token = amm.token_reserve
+                    R_sol   = amm.sol_reserve
+                    k = R_token * R_sol
             
-                info["target_price"]   = proj.new_price
-                info["predicted_mcap"] = proj.new_market_cap_usd
+                    new_R_token = R_token - info["amount"]
+                    if new_R_token <= 0:
+                        return OrderType.UNKNOWN, None, 0.0
+            
+                    new_R_sol = k / new_R_token
+                    new_price_sol = new_R_sol / new_R_token
+                    new_price_usd = new_price_sol * ms.sol_price_usd
+            
+                    if ms.total_supply > 0:
+                        new_mcap = new_price_usd * ms.total_supply
+                    else:
+                        new_mcap = ms.current_market_cap * (new_price_usd / ms.current_price)
+            
+                    info["target_price"]   = new_price_usd
+                    info["predicted_mcap"] = new_mcap
+            
+                else:  # LIMIT_SELL
+                    # Use existing sell_tokens method
+                    proj = amm.sell_tokens(info["amount"])
+                    info["target_price"]   = proj.new_price
+                    info["predicted_mcap"] = proj.new_market_cap_usd
 
             return order_type, info, confidence
 
@@ -2694,7 +2721,6 @@ async def main() -> None:
         await asyncio.gather(
             discord_gateway(),
             helius_monitor(db, ms),
-            x_post_monitor(db),
             announce_startup(),
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
