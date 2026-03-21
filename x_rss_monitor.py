@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import os as _os
 import re
@@ -7,7 +8,7 @@ from collections import deque
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from typing import Optional
-from xeris import send_message, get_timestamp
+
 import httpx
 
 from config.settings import (
@@ -17,7 +18,6 @@ from config.settings import (
     X_INCLUDE_REPLIES,
     X_INCLUDE_RETWEETS,
 )
-from xeris import send_message, get_timestamp
 
 
 # ── RSS sources ───────────────────────────────────────────────────────────────
@@ -167,6 +167,9 @@ def _id_gt(a: str, b: str) -> bool:
 # ── Discord embed ────────────────────────────────────────────────────────────
 
 def _build_kol_embed(username: str, item: dict) -> dict:
+    # Import inside function to break circular import
+    from xeris import get_timestamp
+
     text = (item.get("text") or "").strip()
     url = item.get("url") or f"https://x.com/{username}"
 
@@ -203,6 +206,9 @@ def _build_kol_embed(username: str, item: dict) -> dict:
 # ── Main monitor ─────────────────────────────────────────────────────────────
 
 async def x_post_monitor(db) -> None:
+    # Import inside function to break circular import
+    from xeris import send_message, get_timestamp
+
     if not X_USERNAME or not X_CHANNEL_ID:
         print("ℹ️  X watcher disabled — set X_USERNAME and X_CHANNEL_ID")
         return
