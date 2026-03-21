@@ -1305,6 +1305,7 @@ class TransactionClassifier:
                     "quote_token": quote_symbol}
 
         # 3. LIMIT BUY
+# 3. LIMIT BUY
         if limit_hits and abs(target_delta) < 1e-12:
             has_placement = has_new_order or any(k in logs_lc for k in ["place", "init", "create"])
             if has_placement:
@@ -1314,12 +1315,22 @@ class TransactionClassifier:
                     s_sol, _ = self._signer_sol_flows(tx_data, signer)
                     if s_sol > 0.02: usd_value = s_sol * ms.sol_price_usd
                 if usd_value >= 5.0:
-                    amount        = usd_value / ms.current_price if ms.current_price > 0 else 0.0
-                    tp            = self._estimate_target_price(tx_data, amount, ms)
-                    predicted_mcap = self._predict_mcap(tp, ms) if tp > 0 else 0.0
+                    amount = usd_value / ms.current_price if ms.current_price > 0 else 0.0
+                    if amount <= 0:
+                        return OrderType.UNKNOWN, None
+        
+                    amm = build_amm_from_market_state(ms)
+                    if not amm:
+                        return OrderType.UNKNOWN, None
+        
+                    # For a limit buy, compute the market cap after buying 'amount' tokens
+                    proj = amm.buy_tokens(amount)
+                    predicted_mcap = proj.new_market_cap_usd
+        
                     return OrderType.LIMIT_BUY, {
                         "wallet": signer, "amount": amount, "usd_value": usd_value,
-                        "target_price": tp, "predicted_mcap": predicted_mcap,
+                        "target_price": proj.new_price,
+                        "predicted_mcap": predicted_mcap,
                         "exchange": ex_names(limit_hits),
                         "quote_token": KNOWN_TOKEN_LABELS.get(quote_mint, f"{quote_mint[:8]}…" if quote_mint else "")}
 
@@ -1332,11 +1343,18 @@ class TransactionClassifier:
                 amount    = abs(target_delta)
                 usd_value = amount * ms.current_price
                 if usd_value >= 5.0:
-                    tp            = self._estimate_target_price(tx_data, amount, ms)
-                    predicted_mcap = self._predict_mcap(tp, ms) if tp > 0 else 0.0
+                    amm = build_amm_from_market_state(ms)
+                    if not amm:
+                        return OrderType.UNKNOWN, None
+        
+                    # For a limit sell, compute the market cap after selling 'amount' tokens
+                    proj = amm.sell_tokens(amount)
+                    predicted_mcap = proj.new_market_cap_usd
+        
                     return OrderType.LIMIT_SELL, {
                         "wallet": signer, "amount": amount, "usd_value": usd_value,
-                        "target_price": tp, "predicted_mcap": predicted_mcap,
+                        "target_price": proj.new_price,
+                        "predicted_mcap": predicted_mcap,
                         "exchange": ex_names(limit_hits), "quote_token": ""}
 
         # 5. TRANSFER
@@ -1433,8 +1451,18 @@ class TransactionClassifier:
                     if s_sol > 0.005: usd_value = s_sol * ms.sol_price_usd; amount = usd_value / ms.current_price if ms.current_price > 0 else 0.0
                 info["amount"] = amount; info["usd_value"] = usd_value
                 if info["amount"] <= 0 or info["usd_value"] <= 0: return OrderType.UNKNOWN, None, 0.0
-                tp = self._estimate_target_price(tx_data, info["amount"], ms)
-                info["target_price"] = tp; info["predicted_mcap"] = self._predict_mcap(tp, ms)
+            
+                amm = build_amm_from_market_state(ms)
+                if not amm:
+                    return OrderType.UNKNOWN, None, 0.0
+            
+                if order_type == OrderType.LIMIT_BUY:
+                    proj = amm.buy_tokens(amount)
+                else:   # LIMIT_SELL
+                    proj = amm.sell_tokens(amount)
+            
+                info["target_price"]   = proj.new_price
+                info["predicted_mcap"] = proj.new_market_cap_usd
 
             return order_type, info, confidence
 
