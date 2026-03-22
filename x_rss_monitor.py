@@ -135,6 +135,8 @@ def _parse_rss_posts(xml_text: str, username: str = "") -> List[Dict]:
             items = root.findall(".//{http://www.w3.org/2005/Atom}entry")
 
         print(f"   📄 @{username} — found {len(items)} item(s) in feed")
+        if len(items) == 0:
+            print(f"   🔎 Raw XML preview: {xml_text[:300].strip()}")
 
         for item in items:
             # RSS fields
