@@ -1461,7 +1461,7 @@ class TransactionClassifier:
         if not tok_changed and sol_beyond_fee < 10_000 and not has_meaningful_program:
             return OrderType.UNKNOWN, None
 
-        order_type, info = self.__based(tx_data, signer, ms)
+        order_type, info = self._rule_based(tx_data, signer, ms)
         if order_type != OrderType.UNKNOWN:
             return order_type, info
 
