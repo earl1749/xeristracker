@@ -2265,33 +2265,87 @@ def _build_price_embed(pct: float, ref: float, ms: MarketState) -> dict:
 async def update_price(ms: MarketState) -> None:
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r    = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{MINT}")
+            # Main token pair data
+            r = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{MINT}")
             data = r.json()
+
+            # SOL price data
+            sol_r = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{WSOL_MINT}")
+            sol_data = sol_r.json()
+
         pair = _pick_best_pair(data.get("pairs") or [])
-        if not pair: print("⚠️ No pairs on DexScreener"); return
-        new_price     = float(pair.get("priceUsd") or 0)
-        liq           = pair.get("liquidity") or {}
+        if not pair:
+            print("⚠️ No pairs on DexScreener")
+            return
+
+        sol_pair = _pick_best_pair(sol_data.get("pairs") or [])
+        if sol_pair:
+            ms.sol_price_usd = float(sol_pair.get("priceUsd") or 0)
+
+        liq = pair.get("liquidity") or {}
+        quote_token = pair.get("quoteToken") or {}
+
         ms.pool_token_reserve = float(liq.get("base") or 0)
-        ms.pool_sol_reserve   = float(liq.get("quote") or 0)
-        ms.pool_liquidity_usd = float(liq.get("usd")   or 0)
-        fdv  = pair.get("fdv")
+        ms.pool_quote_reserve = float(liq.get("quote") or 0)
+        ms.pool_liquidity_usd = float(liq.get("usd") or 0)
+
+        ms.quote_mint = quote_token.get("address", "") or ""
+        ms.quote_symbol = (quote_token.get("symbol") or "").upper()
+
+        # Set quote_to_usd
+        if ms.quote_symbol in {"USDC", "USDT"}:
+            ms.quote_to_usd = 1.0
+        elif ms.quote_symbol in {"SOL", "WSOL"} or ms.quote_mint == WSOL_MINT:
+            ms.quote_to_usd = ms.sol_price_usd
+        else:
+            # Try to fetch quote token USD price from DexScreener
+            ms.quote_to_usd = 0.0
+            if ms.quote_mint:
+                try:
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        qr = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{ms.quote_mint}")
+                        quote_data = qr.json()
+                    quote_pair = _pick_best_pair(quote_data.get("pairs") or [])
+                    if quote_pair:
+                        ms.quote_to_usd = float(quote_pair.get("priceUsd") or 0)
+                except Exception as e:
+                    print(f"⚠️ Quote token price fetch error: {e}")
+                    ms.quote_to_usd = 0.0
+
+        new_price = float(pair.get("priceUsd") or 0)
+
+        fdv = pair.get("fdv")
         mcap = pair.get("marketCap")
-        
+
         if mcap:
             ms.current_market_cap = float(mcap)
         elif fdv:
             ms.current_market_cap = float(fdv)
         else:
             ms.current_market_cap = 0.0
-        if ms.price_reference == 0.0 and new_price > 0: ms.price_reference = new_price
-        ms.current_price = new_price; ms.last_price_update = time.time()
-        print(f"💰 ${ms.current_price:.8f}  |  MCap {format_usd(ms.current_market_cap)}")
-        if ms.price_reference > 0: await _check_price_alert(ms)
+
+        if ms.price_reference == 0.0 and new_price > 0:
+            ms.price_reference = new_price
+
+        ms.current_price = new_price
+        ms.last_price_update = time.time()
+
+        if ms.price_reference > 0:
+            await _check_price_alert(ms)
+
         if ms.total_supply <= 0 and ms.current_price > 0 and ms.current_market_cap > 0:
             ms.total_supply = ms.current_market_cap / ms.current_price
+
+        print(
+            f"💰 ${ms.current_price:.8f} | "
+            f"MCap {format_usd(ms.current_market_cap)} | "
+            f"Quote {ms.quote_symbol or '?'} | "
+            f"QuoteReserve {ms.pool_quote_reserve:.6f} | "
+            f"Quote/USD {ms.quote_to_usd:.8f}"
+        )
+
     except Exception as e:
         print(f"❌ Price error: {e}")
-
 async def _check_price_alert(ms: MarketState) -> None:
     if ms.price_reference <= 0 or ms.current_price <= 0: return
     pct = (ms.current_price - ms.price_reference) / ms.price_reference * 100
