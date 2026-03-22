@@ -48,7 +48,9 @@ X_POLL_SECONDS    = int(os.getenv("X_POLL_SECONDS", "60"))
 X_INCLUDE_REPLIES  = os.getenv("X_INCLUDE_REPLIES",  "false").lower() == "true"
 X_INCLUDE_RETWEETS = os.getenv("X_INCLUDE_RETWEETS", "false").lower() == "true"
 X_API_BASE        = os.getenv("X_API_BASE", "https://api.x.com/2").rstrip("/")
-
+X_ANNOUNCE_CHANNEL_ID = int(os.getenv("X_ANNOUNCE_CHANNEL_ID", "0"))
+RAID_CHANNEL_ID       = int(os.getenv("RAID_CHANNEL_ID",       "0"))
+RSSHUB_INSTANCE       = os.getenv("RSSHUB_INSTANCE", "https://rsshub.app")
 # ── File paths ───────────────────────────────────────────────────────────────
 DB_PATH              = os.getenv("DB_PATH",              "runtime/limit_orders.db")
 PROGRAMS_FILE        = os.getenv("PROGRAMS_FILE",        "data/programs.json")
