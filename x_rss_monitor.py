@@ -40,13 +40,24 @@ POLL_INTERVAL = 90
 # Max total watched accounts (including the default)
 MAX_ACCOUNTS = 3
 
-# Nitter instances to try in order (public RSS proxy for X)
+# Nitter instances to try in order (public RSS proxy for X).
+# These rotate frequently — update if all fail.
 NITTER_INSTANCES = [
-    "https://nitter.privacydev.net",
     "https://nitter.poast.org",
+    "https://nitter.privacydev.net",
     "https://nitter.1d4.us",
     "https://nitter.kavin.rocks",
+    "https://nitter.catsarch.com",
+    "https://nitter.unixfox.eu",
+    "https://nitter.moomoo.me",
+    "https://nitter.esmailelbob.xyz",
+    "https://nitter.tiekoetter.com",
+    "https://nitter.42l.fr",
 ]
+
+# RSSHub fallback — reliable alternative to nitter.
+# Use the public demo (rate-limited) or set "" to skip.
+RSSHUB_INSTANCE = "rsshub-production-69fe.up.railway.app"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -55,17 +66,40 @@ def _strip_at(username: str) -> str:
     return username.lstrip("@").strip().lower()
 
 
+async def _try_url(client: httpx.AsyncClient, url: str) -> Optional[str]:
+    """Fetch a single URL, return text if it looks like RSS/Atom, else None."""
+    try:
+        r = await client.get(url, headers={"User-Agent": "Mozilla/5.0 XerisBot/2.0"})
+        if r.status_code == 200 and ("<rss" in r.text or "<feed" in r.text):
+            return r.text
+    except Exception:
+        pass
+    return None
+
+
 async def _fetch_rss(username: str) -> Optional[str]:
-    """Try each nitter instance until one responds with valid RSS."""
-    for base in NITTER_INSTANCES:
-        url = f"{base}/{username}/rss"
-        try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                r = await client.get(url, headers={"User-Agent": "XerisBot/2.0"})
-            if r.status_code == 200 and "<rss" in r.text:
-                return r.text
-        except Exception:
-            continue
+    """
+    Try multiple RSS sources in order:
+      1. Each nitter instance  (/<username>/rss)
+      2. RSSHub                (/twitter/user/<username>)
+    Returns the first valid feed text, or None if all fail.
+    """
+    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        # 1. Nitter instances
+        for base in NITTER_INSTANCES:
+            result = await _try_url(client, f"{base}/{username}/rss")
+            if result:
+                print(f"   ✅ RSS via {base}")
+                return result
+
+        # 2. RSSHub fallback
+        if RSSHUB_INSTANCE:
+            result = await _try_url(client, f"{RSSHUB_INSTANCE}/twitter/user/{username}")
+            if result:
+                print(f"   ✅ RSS via RSSHub")
+                return result
+
+    print(f"   ⚠️ All RSS sources failed for @{username} — will retry next cycle")
     return None
 
 
