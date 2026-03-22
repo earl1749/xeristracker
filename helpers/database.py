@@ -63,6 +63,7 @@ class DatabaseManager:
                     last_post_id   TEXT NOT NULL DEFAULT '',
                     last_post_time TEXT NOT NULL DEFAULT '',
                     added_by       TEXT NOT NULL DEFAULT 'system',
+                    channel_id     INTEGER NOT NULL DEFAULT 0,
                     updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )""")
             # Migrations
@@ -77,6 +78,11 @@ class DatabaseManager:
             # added_by migration for x_watch_state
             try:
                 c.execute("ALTER TABLE x_watch_state ADD COLUMN added_by TEXT NOT NULL DEFAULT 'system'")
+            except Exception:
+                pass
+            # channel_id migration for x_watch_state
+            try:
+                c.execute("ALTER TABLE x_watch_state ADD COLUMN channel_id INTEGER NOT NULL DEFAULT 0")
             except Exception:
                 pass
 
@@ -171,16 +177,16 @@ class DatabaseManager:
                 updated_at     = CURRENT_TIMESTAMP
         """, (username.lower(), user_id, last_post_id, last_post_time, added_by))
 
-    async def add_x_watch(self, username: str, added_by: str = "system") -> bool:
+    async def add_x_watch(self, username: str, added_by: str = "system", channel_id: int = 0) -> bool:
         """Add a new account to watch. Returns False if already exists."""
         existing = await self.get_x_watch_state(username)
         if existing:
             return False
         await self._exec("""
             INSERT OR IGNORE INTO x_watch_state
-              (username, user_id, last_post_id, last_post_time, added_by, updated_at)
-            VALUES (?, '', '', '', ?, CURRENT_TIMESTAMP)
-        """, (username.lower(), added_by))
+              (username, user_id, last_post_id, last_post_time, added_by, channel_id, updated_at)
+            VALUES (?, '', '', '', ?, ?, CURRENT_TIMESTAMP)
+        """, (username.lower(), added_by, channel_id))
         return True
 
     async def remove_x_watch(self, username: str) -> bool:
