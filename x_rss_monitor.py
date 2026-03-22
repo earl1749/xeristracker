@@ -61,16 +61,30 @@ async def _try_url(client: httpx.AsyncClient, url: str) -> Optional[str]:
 
 async def _fetch_rss(username: str) -> Optional[str]:
     async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        # 1. Nitter instances
         for base in NITTER_INSTANCES:
             result = await _try_url(client, f"{base}/{username}/rss")
-            if result:
+            if result and "<item>" in result:
                 print(f"   ✅ RSS via {base}")
                 return result
+
+        # 2. RSSHub — try multiple routes
+        # Personal accounts sometimes need different paths than channel/brand accounts
         if RSSHUB_INSTANCE:
-            result = await _try_url(client, f"{RSSHUB_INSTANCE}/twitter/user/{username}")
-            if result:
-                print(f"   ✅ RSS via RSSHub")
-                return result
+            rsshub_routes = [
+                f"{RSSHUB_INSTANCE}/twitter/user/{username}",
+                f"{RSSHUB_INSTANCE}/twitter/user/{username}/tweets",
+                f"{RSSHUB_INSTANCE}/x/user/{username}",
+                f"{RSSHUB_INSTANCE}/twitter/user/{username}/media",
+            ]
+            for url in rsshub_routes:
+                result = await _try_url(client, url)
+                if result and "<item>" in result:
+                    print(f"   ✅ RSS via {url}")
+                    return result
+                elif result:
+                    print(f"   ⚠️ {url.split('/')[-2]}/{url.split('/')[-1]} — empty feed")
+
     print(f"   ⚠️ All RSS sources failed for @{username} — will retry next cycle")
     return None
 
