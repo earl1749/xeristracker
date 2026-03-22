@@ -1,3 +1,18 @@
+"""
+x_rss_monitor.py
+────────────────
+Monitors X (Twitter) accounts for new posts and relays them to Discord.
+
+Channel routing:
+  • Default account (XerisCoin) → X_ANNOUNCE_CHANNEL_ID  (your X announcements channel)
+  • Raided accounts             → RAID_CHANNEL_ID         (your raid / alpha channel)
+  • Or specify a channel per account: !raid @username #channel-id
+
+Commands:
+  !raid @username [channel_id]  — add account (max 3), optional target channel
+  !unraid @username             — remove a watched account (default cannot be removed)
+  !raidlist                     — show all watched accounts + their target channels
+"""
 
 from __future__ import annotations
 
@@ -7,18 +22,23 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
-import os
+
 import httpx
 
-from config.settings import ALERT_CHANNEL_ID
+from config.settings import ALERT_CHANNEL_ID, X_ANNOUNCE_CHANNEL_ID, RAID_CHANNEL_ID, RSSHUB_INSTANCE
 from helpers.database import DatabaseManager
 from helpers.discord_utils import send_message, send_message_with_image
 from helpers.formatters import get_timestamp
 
+# ── Account config ─────────────────────────────────────────────────────────────
 
+# The hardcoded default — always seeded, cannot be removed, posts to X_ANNOUNCE_CHANNEL_ID
 DEFAULT_X_ACCOUNT = "XerisCoin"
 
+# How often to poll each account (seconds)
 POLL_INTERVAL = 90
+
+# Max total watched accounts (including the default)
 MAX_ACCOUNTS = 3
 
 # ── RSS sources ────────────────────────────────────────────────────────────────
@@ -35,10 +55,6 @@ NITTER_INSTANCES = [
     "https://nitter.tiekoetter.com",
     "https://nitter.42l.fr",
 ]
-
-X_ANNOUNCE_CHANNEL_ID = int(os.getenv("X_ANNOUNCE_CHANNEL_ID", "0"))
-RAID_CHANNEL_ID       = int(os.getenv("RAID_CHANNEL_ID", "0"))
-RSSHUB_INSTANCE       = os.getenv("RSSHUB_INSTANCE", "https://rsshub.app")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # RSS fetching
