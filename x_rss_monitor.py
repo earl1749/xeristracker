@@ -1,18 +1,3 @@
-"""
-x_rss_monitor.py
-────────────────
-Monitors X (Twitter) accounts for new posts and relays them to Discord.
-
-Channel routing:
-  • Default account (XerisCoin) → X_ANNOUNCE_CHANNEL_ID  (your X announcements channel)
-  • Raided accounts             → RAID_CHANNEL_ID         (your raid / alpha channel)
-  • Or specify a channel per account: !raid @username #channel-id
-
-Commands:
-  !raid @username [channel_id]  — add account (max 3), optional target channel
-  !unraid @username             — remove a watched account (default cannot be removed)
-  !raidlist                     — show all watched accounts + their target channels
-"""
 
 from __future__ import annotations
 
@@ -470,11 +455,27 @@ async def _cmd_raid_add(
         }])
         return
 
+    # Parse feed and save the latest post ID immediately
+    # so the monitor starts tracking from NOW, not from empty
+    posts        = _parse_rss_posts(xml_text)
+    latest_id    = posts[-1]["post_id"] if posts else ""
+    latest_ts    = str(posts[-1]["timestamp"]) if posts else ""
+
     # Determine destination channel
     dest_channel = target_channel or RAID_CHANNEL_ID
     ch_label     = f"<#{dest_channel}> (`{dest_channel}`)"
 
     await db.add_x_watch(username, added_by=added_by, channel_id=dest_channel)
+
+    # Save initial state so next poll only alerts on posts AFTER this moment
+    if latest_id:
+        await db.upsert_x_watch_state(
+            username=username,
+            user_id="",
+            last_post_id=latest_id,
+            last_post_time=latest_ts,
+        )
+        print(f"   📌 @{username} seeded with latest post ID: {latest_id[:20]}")
     count_after = await db.count_x_watched()
 
     await send_message(channel_id, embeds=[{
