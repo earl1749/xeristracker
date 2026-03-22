@@ -1,3 +1,18 @@
+"""
+x_rss_monitor.py
+────────────────
+Monitors X (Twitter) accounts for new posts and relays them to Discord.
+
+Channel routing:
+  • Default account (XerisCoin) → X_ANNOUNCE_CHANNEL_ID  (your X announcements channel)
+  • Raided accounts             → RAID_CHANNEL_ID         (your raid / alpha channel)
+  • Or specify a channel per account: !raid @username #channel-id
+
+Commands:
+  !raid @username [channel_id]  — add account (max 3), optional target channel
+  !unraid @username             — remove a watched account (default cannot be removed)
+  !raidlist                     — show all watched accounts + their target channels
+"""
 
 from __future__ import annotations
 
@@ -107,30 +122,47 @@ def _clean_content(raw: str) -> str:
     return text
 
 
-def _parse_rss_posts(xml_text: str) -> List[Dict]:
+def _parse_rss_posts(xml_text: str, username: str = "") -> List[Dict]:
     posts = []
     try:
         root  = ET.fromstring(xml_text)
         ns    = {"media": "http://search.yahoo.com/mrss/",
                  "content": "http://purl.org/rss/1.0/modules/content/"}
+
+        # Support both RSS <item> and Atom <entry>
         items = root.findall(".//item")
+        if not items:
+            items = root.findall(".//{http://www.w3.org/2005/Atom}entry")
+
+        print(f"   📄 @{username} — found {len(items)} item(s) in feed")
+
         for item in items:
+            # RSS fields
             guid    = (item.findtext("guid")    or "").strip()
             title   = (item.findtext("title")   or "").strip()
             link    = (item.findtext("link")    or "").strip()
             pub_str = (item.findtext("pubDate") or "").strip()
 
-            # Get full post content — prefer content:encoded, fallback to description, then title
+            # Atom fields fallback
+            if not guid:
+                guid = (item.findtext("{http://www.w3.org/2005/Atom}id") or "").strip()
+            if not title:
+                title = (item.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
+            if not link:
+                link_el = item.find("{http://www.w3.org/2005/Atom}link")
+                if link_el is not None:
+                    link = link_el.get("href", "")
+            if not pub_str:
+                pub_str = (item.findtext("{http://www.w3.org/2005/Atom}published") or
+                           item.findtext("{http://www.w3.org/2005/Atom}updated") or "").strip()
+
+            # Get full post content
             content_encoded = item.findtext("content:encoded", namespaces=ns) or ""
             description     = item.findtext("description") or ""
             raw_content     = content_encoded or description or title
             content         = _clean_content(raw_content)
-
-            # If content is empty or just a URL, fall back to title
             if not content or content.startswith("http"):
                 content = _clean_content(title)
-
-            # Trim to 500 chars
             if len(content) > 500:
                 content = content[:497] + "…"
 
@@ -138,19 +170,19 @@ def _parse_rss_posts(xml_text: str) -> List[Dict]:
             media_content = item.find("media:content", ns)
             image_url = media_content.get("url") if media_content is not None else None
 
-            if not guid:
+            # Need at least a guid or link to track uniqueness
+            if not guid and not link:
                 continue
 
             ts = _parse_timestamp(pub_str)
 
-            # Extract numeric post ID from guid or link (most reliable unique key)
+            # Extract numeric post ID
             post_id = ""
-            m = re.search(r"/status/(\d+)", guid + " " + link)
+            m = re.search(r"/status/(\d+)", (guid or "") + " " + (link or ""))
             if m:
                 post_id = m.group(1)
             else:
-                # fallback: use full guid
-                post_id = guid
+                post_id = guid or link
 
             posts.append({
                 "post_id":   post_id,
@@ -159,8 +191,9 @@ def _parse_rss_posts(xml_text: str) -> List[Dict]:
                 "timestamp": ts,
                 "image_url": image_url,
             })
+
     except Exception as e:
-        print(f"   ⚠️ RSS parse error: {e}")
+        print(f"   ⚠️ RSS parse error for @{username}: {e}")
 
     posts.sort(key=lambda p: p["timestamp"])
     return posts
@@ -217,7 +250,7 @@ async def _check_account(row: Dict, db: DatabaseManager) -> None:
     if not xml_text:
         return
 
-    posts = _parse_rss_posts(xml_text)  # sorted oldest → newest
+    posts = _parse_rss_posts(xml_text, username)  # sorted oldest → newest
     if not posts:
         return
 
@@ -457,7 +490,7 @@ async def _cmd_raid_add(
 
     # Parse feed and save the latest post ID immediately
     # so the monitor starts tracking from NOW, not from empty
-    posts        = _parse_rss_posts(xml_text)
+    posts        = _parse_rss_posts(xml_text, username)
     latest_id    = posts[-1]["post_id"] if posts else ""
     latest_ts    = str(posts[-1]["timestamp"]) if posts else ""
 
