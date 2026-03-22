@@ -33,10 +33,10 @@ from helpers.formatters import get_timestamp
 # ── Channel config ─────────────────────────────────────────────────────────────
 
 # Where XerisCoin's own posts go (your X announcements channel)
-X_ANNOUNCE_CHANNEL_ID: int = ALERT_CHANNEL_ID   # ← change to your announcements channel ID
+X_ANNOUNCE_CHANNEL_ID: int = 1483822900795670678  # ← change to your announcements channel ID
 
 # Where raided/watched accounts' posts go (separate raid/alpha channel)
-RAID_CHANNEL_ID: int = ALERT_CHANNEL_ID          # ← change to your raid channel ID
+RAID_CHANNEL_ID: int = 1481659347460161607          # ← change to your raid channel ID
 
 # ── Account config ─────────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ NITTER_INSTANCES = [
 ]
 
 # Your self-hosted RSSHub instance — set "" to skip
-RSSHUB_INSTANCE = "https://rsshub.app"
+RSSHUB_INSTANCE = "https://rsshub-production-69fe.up.railway.app"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # RSS fetching
