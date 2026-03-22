@@ -194,7 +194,58 @@ def usd_to_quote_amount(usd_value: float, ms: MarketState) -> float:
         return 0.0
     return usd_value / quote_price_usd
 
+def estimate_mcap_before_after_any_quote(
+    current_mcap: float,
+    usd_value: float,
+    pool_quote_reserve_after: float,
+    is_buy: bool,
+    ms: MarketState,
+) -> Dict[str, float]:
+    quote_price_usd = get_quote_price_usd(ms)
+    if current_mcap <= 0 or usd_value <= 0 or quote_price_usd <= 0:
+        return {
+            "before_mcap": current_mcap,
+            "after_mcap": current_mcap,
+            "change_usd": 0.0,
+            "change_pct": 0.0,
+            "quote_amount": 0.0,
+            "quote_price_usd": quote_price_usd,
+        }
 
+    quote_amount = usd_to_quote_amount(usd_value, ms)
+
+    if pool_quote_reserve_after <= 0:
+        return {
+            "before_mcap": current_mcap,
+            "after_mcap": current_mcap,
+            "change_usd": 0.0,
+            "change_pct": 0.0,
+            "quote_amount": quote_amount,
+            "quote_price_usd": quote_price_usd,
+        }
+
+    if is_buy:
+        before_quote_reserve = max(pool_quote_reserve_after - quote_amount, 0.0)
+    else:
+        before_quote_reserve = pool_quote_reserve_after + quote_amount
+
+    if before_quote_reserve <= 0:
+        before_mcap = current_mcap
+    else:
+        before_mcap = current_mcap * (before_quote_reserve / pool_quote_reserve_after)
+
+    after_mcap = current_mcap
+    change_usd = after_mcap - before_mcap
+    change_pct = (change_usd / before_mcap * 100.0) if before_mcap > 0 else 0.0
+
+    return {
+        "before_mcap": before_mcap,
+        "after_mcap": after_mcap,
+        "change_usd": change_usd,
+        "change_pct": change_pct,
+        "quote_amount": quote_amount,
+        "quote_price_usd": quote_price_usd,
+    }
 def project_limit_buy(quote_amount: float, ms: MarketState) -> Optional[Dict[str, float]]:
     if (
         quote_amount <= 0 or
