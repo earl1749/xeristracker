@@ -7,7 +7,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
-
+import os
 import httpx
 
 from config.settings import ALERT_CHANNEL_ID
