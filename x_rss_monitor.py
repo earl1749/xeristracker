@@ -1,18 +1,3 @@
-"""
-x_rss_monitor.py
-────────────────
-Monitors X (Twitter) accounts for new posts and relays them to Discord.
-
-Channel routing:
-  • Default account (XerisCoin) → X_ANNOUNCE_CHANNEL_ID  (your X announcements channel)
-  • Raided accounts             → RAID_CHANNEL_ID         (your raid / alpha channel)
-  • Or specify a channel per account: !raid @username #channel-id
-
-Commands:
-  !raid @username [channel_id]  — add account (max 3), optional target channel
-  !unraid @username             — remove a watched account (default cannot be removed)
-  !raidlist                     — show all watched accounts + their target channels
-"""
 
 from __future__ import annotations
 
@@ -136,7 +121,12 @@ def _parse_rss_posts(xml_text: str, username: str = "") -> List[Dict]:
 
         print(f"   📄 @{username} — found {len(items)} item(s) in feed")
         if len(items) == 0:
-            print(f"   🔎 Raw XML preview: {xml_text[:300].strip()}")
+            # Print full XML to see structure
+            print(f"   🔎 Full XML ({len(xml_text)} chars):")
+            print(xml_text[:1500])
+            # Also list all tags found in the feed
+            all_tags = set(el.tag for el in root.iter())
+            print(f"   🏷️  Tags found: {all_tags}")
 
         for item in items:
             # RSS fields
