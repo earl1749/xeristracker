@@ -44,7 +44,7 @@ RAID_CHANNEL_ID: int = 1481659347460161607          # ← change to your raid ch
 DEFAULT_X_ACCOUNT = "XerisCoin"
 
 # How often to poll each account (seconds)
-POLL_INTERVAL = 90
+POLL_INTERVAL = 60
 
 # Max total watched accounts (including the default)
 MAX_ACCOUNTS = 3
@@ -297,7 +297,7 @@ async def _check_account(row: Dict, db: DatabaseManager) -> None:
     for post in new_posts[-3:]:
         # Only alert if the post is < 2 minutes old
         age_seconds = time.time() - post["timestamp"]
-        if post["timestamp"] > 0 and age_seconds > 120:
+        if post["timestamp"] > 0 and age_seconds > 3600:
             print(f"   ⏩ Skipping post ({int(age_seconds)}s old) from @{username} — too old")
             continue
 
