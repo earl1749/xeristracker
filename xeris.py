@@ -176,7 +176,111 @@ def build_amm_from_market_state(ms: MarketState, fee_rate: float = 0.0025) -> Op
         )
     except Exception:
         return None
+def get_quote_price_usd(ms: MarketState) -> float:
+    quote = (getattr(ms, "quote_symbol", "") or "").upper()
 
+    if quote in {"USDC", "USDT"}:
+        return 1.0
+
+    if quote in {"SOL", "WSOL"}:
+        return max(0.0, getattr(ms, "sol_price_usd", 0.0))
+
+    return max(0.0, getattr(ms, "quote_to_usd", 0.0))
+
+
+def usd_to_quote_amount(usd_value: float, ms: MarketState) -> float:
+    quote_price_usd = get_quote_price_usd(ms)
+    if usd_value <= 0 or quote_price_usd <= 0:
+        return 0.0
+    return usd_value / quote_price_usd
+
+
+def project_limit_buy(quote_amount: float, ms: MarketState) -> Optional[Dict[str, float]]:
+    if (
+        quote_amount <= 0 or
+        ms.pool_token_reserve <= 0 or
+        ms.pool_quote_reserve <= 0 or
+        ms.total_supply <= 0
+    ):
+        return None
+
+    quote_to_usd = get_quote_price_usd(ms)
+    if quote_to_usd <= 0:
+        return None
+
+    x = ms.pool_token_reserve
+    y = ms.pool_quote_reserve
+    k = x * y
+
+    # Buyer adds quote asset to the pool
+    y_new = y + quote_amount
+    x_new = k / y_new
+
+    if x_new <= 0 or x_new >= x:
+        return None
+
+    tokens_bought = x - x_new
+    price_new_quote = y_new / x_new
+    price_new_usd = price_new_quote * quote_to_usd
+    mcap_new = price_new_usd * ms.total_supply
+
+    current_price_quote = y / x
+    price_impact_pct = (
+        ((price_new_quote - current_price_quote) / current_price_quote) * 100
+        if current_price_quote > 0 else 0.0
+    )
+
+    return {
+        "tokens_bought": tokens_bought,
+        "quote_amount": quote_amount,
+        "new_price_usd": price_new_usd,
+        "new_mcap": mcap_new,
+        "price_impact_pct": price_impact_pct,
+    }
+
+
+def project_limit_sell(token_amount: float, ms: MarketState) -> Optional[Dict[str, float]]:
+    if (
+        token_amount <= 0 or
+        ms.pool_token_reserve <= 0 or
+        ms.pool_quote_reserve <= 0 or
+        ms.total_supply <= 0
+    ):
+        return None
+
+    quote_to_usd = get_quote_price_usd(ms)
+    if quote_to_usd <= 0:
+        return None
+
+    x = ms.pool_token_reserve
+    y = ms.pool_quote_reserve
+    k = x * y
+
+    # Seller adds tokens to pool
+    x_new = x + token_amount
+    y_new = k / x_new
+
+    if y_new <= 0 or y_new >= y:
+        return None
+
+    quote_received = y - y_new
+    price_new_quote = y_new / x_new
+    price_new_usd = price_new_quote * quote_to_usd
+    mcap_new = price_new_usd * ms.total_supply
+
+    current_price_quote = y / x
+    price_impact_pct = (
+        ((price_new_quote - current_price_quote) / current_price_quote) * 100
+        if current_price_quote > 0 else 0.0
+    )
+
+    return {
+        "quote_received": quote_received,
+        "token_amount": token_amount,
+        "new_price_usd": price_new_usd,
+        "new_mcap": mcap_new,
+        "price_impact_pct": price_impact_pct,
+    }
 # ═════════════════════════════════════════════════════════════════════════════
 # Transaction helpers
 # ═════════════════════════════════════════════════════════════════════════════
@@ -224,7 +328,96 @@ def get_signer_token_deltas(tx_data: Dict, signer: str) -> Dict[str, float]:
 
     return dict(deltas)
 
+def project_limit_buy(
+    quote_amount: float,
+    ms: MarketState,
+) -> Optional[Dict[str, float]]:
+    if (
+        quote_amount <= 0 or
+        ms.pool_token_reserve <= 0 or
+        ms.pool_quote_reserve <= 0 or
+        ms.total_supply <= 0
+    ):
+        return None
 
+    quote_to_usd = get_quote_price_usd(ms)
+    if quote_to_usd <= 0:
+        return None
+
+    x = ms.pool_token_reserve
+    y = ms.pool_quote_reserve
+    k = x * y
+
+    y_new = y + quote_amount
+    x_new = k / y_new
+
+    if x_new <= 0:
+        return None
+
+    tokens_bought = x - x_new
+    price_new_quote = y_new / x_new
+    price_new_usd = price_new_quote * quote_to_usd
+    mcap_new = price_new_usd * ms.total_supply
+
+    current_price_quote = y / x
+    price_impact_pct = (
+        ((price_new_quote - current_price_quote) / current_price_quote) * 100
+        if current_price_quote > 0 else 0.0
+    )
+
+    return {
+        "tokens_bought": tokens_bought,
+        "quote_amount": quote_amount,
+        "new_price_usd": price_new_usd,
+        "new_mcap": mcap_new,
+        "price_impact_pct": price_impact_pct,
+    }
+
+
+def project_limit_sell(
+    token_amount: float,
+    ms: MarketState,
+) -> Optional[Dict[str, float]]:
+    if (
+        token_amount <= 0 or
+        ms.pool_token_reserve <= 0 or
+        ms.pool_quote_reserve <= 0 or
+        ms.total_supply <= 0
+    ):
+        return None
+
+    quote_to_usd = get_quote_price_usd(ms)
+    if quote_to_usd <= 0:
+        return None
+
+    x = ms.pool_token_reserve
+    y = ms.pool_quote_reserve
+    k = x * y
+
+    x_new = x + token_amount
+    y_new = k / x_new
+
+    if y_new <= 0:
+        return None
+
+    quote_received = y - y_new
+    price_new_quote = y_new / x_new
+    price_new_usd = price_new_quote * quote_to_usd
+    mcap_new = price_new_usd * ms.total_supply
+
+    current_price_quote = y / x
+    price_impact_pct = (
+        ((price_new_quote - current_price_quote) / current_price_quote) * 100
+        if current_price_quote > 0 else 0.0
+    )
+
+    return {
+        "quote_received": quote_received,
+        "token_amount": token_amount,
+        "new_price_usd": price_new_usd,
+        "new_mcap": mcap_new,
+        "price_impact_pct": price_impact_pct,
+    }
 # ═════════════════════════════════════════════════════════════════════════════
 # Discord queue & messaging
 # ═════════════════════════════════════════════════════════════════════════════
@@ -478,7 +671,94 @@ async def send_message_get_id(
 
     print("   ❌ send_message_get_id failed after retries")
     return None
+async def send_message_with_image(
+    channel_id: int,
+    content: str,
+    image_url: str,
+    mention_everyone: bool = False,
+    max_retries: int = 3,
+) -> bool:
+    headers = {
+        "Authorization": f"Bot {DISCORD_TOKEN}",
+        "User-Agent": "XerisBot/2.0",
+    }
 
+    parts = []
+    if mention_everyone:
+        parts.append("@everyone")
+    if content:
+        cleaned = content.strip()
+        if cleaned:
+            parts.append(cleaned)
+
+    final_content = " ".join(parts).strip()
+    if not final_content:
+        final_content = " "
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                img_resp = await client.get(image_url, headers={"User-Agent": "XerisBot/2.0"})
+                if img_resp.status_code != 200 or not img_resp.content:
+                    print(f"   ⚠️ Image download failed: {img_resp.status_code} {image_url}")
+                    return await send_message(
+                        channel_id,
+                        content=(final_content + f"\n\n{image_url}").strip(),
+                        mention_everyone=False,
+                    )
+
+                content_type = (img_resp.headers.get("content-type") or "").lower()
+                if "png" in content_type:
+                    filename = "x_post_image.png"
+                    mime = "image/png"
+                elif "webp" in content_type:
+                    filename = "x_post_image.webp"
+                    mime = "image/webp"
+                elif "gif" in content_type:
+                    filename = "x_post_image.gif"
+                    mime = "image/gif"
+                else:
+                    filename = "x_post_image.jpg"
+                    mime = "image/jpeg"
+
+                r = await client.post(
+                    f"{DISCORD_API}/channels/{channel_id}/messages",
+                    headers=headers,
+                    data={"content": final_content},
+                    files={"file": (filename, img_resp.content, mime)},
+                )
+
+            if r.status_code in (200, 201):
+                print("   ✅ Message with image sent")
+                return True
+
+            if r.status_code == 429:
+                retry_after = 2.0
+                try:
+                    data = r.json()
+                    retry_after = float(data.get("retry_after", retry_after))
+                except Exception:
+                    pass
+                await asyncio.sleep(retry_after + 0.25)
+                continue
+
+            print(f"   ❌ Discord image send failed: {r.status_code} {(r.text or '')[:200]}")
+            return await send_message(
+                channel_id,
+                content=(final_content + f"\n\n{image_url}").strip(),
+                mention_everyone=False,
+            )
+
+        except Exception as e:
+            print(f"   ❌ send_message_with_image error (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(min(2 * attempt, 5))
+
+    return await send_message(
+        channel_id,
+        content=(final_content + f"\n\n{image_url}").strip(),
+        mention_everyone=False,
+    )
 
 async def send_temp_message(
     channel_id: int,
@@ -1181,7 +1461,7 @@ class TransactionClassifier:
         if not tok_changed and sol_beyond_fee < 10_000 and not has_meaningful_program:
             return OrderType.UNKNOWN, None
 
-        order_type, info = self._rule_based(tx_data, signer, ms)
+        order_type, info = self.__based(tx_data, signer, ms)
         if order_type != OrderType.UNKNOWN:
             return order_type, info
 
@@ -1222,170 +1502,190 @@ class TransactionClassifier:
         return OrderType.UNKNOWN, None
 
     def _rule_based(self, tx_data: Dict, signer: str, ms: MarketState) -> Tuple[OrderType, Optional[Dict]]:
-        meta    = tx_data.get("meta", {})
-        if meta.get("err"): return OrderType.UNKNOWN, None
-
+        meta = tx_data.get("meta", {})
+        if meta.get("err"):
+            return OrderType.UNKNOWN, None
+    
         programs = get_all_program_ids(tx_data)
-        all_ixs  = get_all_instructions(tx_data)
-        deltas   = get_signer_token_deltas(tx_data, signer)
+        all_ixs = get_all_instructions(tx_data)
+        deltas = get_signer_token_deltas(tx_data, signer)
         target_delta = deltas.get(MINT, 0.0)
         sol_spent, sol_received = self._signer_sol_flows(tx_data, signer)
-
-        learned_limit  = {p for p in programs if self._known_role(p) in ("limit",  "hybrid")}
+    
+        learned_limit = {p for p in programs if self._known_role(p) in ("limit", "hybrid")}
         learned_market = {p for p in programs if self._known_role(p) in ("market", "hybrid")}
-        limit_hits  = (programs & LIMIT_ORDER_PROGRAMS) | learned_limit
+        limit_hits = (programs & LIMIT_ORDER_PROGRAMS) | learned_limit
         market_hits = (programs & ALL_SWAP_PROGRAMS) | (programs & DEX_PROGRAMS) | learned_market
-
-        has_cancel = has_new_order = False
+    
+        has_cancel = False
+        has_new_order = False
         logs_lc = " ".join(meta.get("logMessages") or []).lower()
+    
         for ix in all_ixs:
             raw = self._decode_ix_data(ix.get("data", ""))
             if raw and len(raw) >= 8:
                 disc = DISCRIMINATORS.get(raw[:8])
-                if disc == "cancel_order": has_cancel = True
-                elif disc == "new_order":  has_new_order = True
-        if "cancel" in logs_lc or "withdraw order" in logs_lc: has_cancel = True
-        if any(k in logs_lc for k in ["new order", "place order", "limit"]): has_new_order = True
-
+                if disc == "cancel_order":
+                    has_cancel = True
+                elif disc == "new_order":
+                    has_new_order = True
+    
+        if "cancel" in logs_lc or "withdraw order" in logs_lc:
+            has_cancel = True
+        if any(k in logs_lc for k in ["new order", "place order", "limit", "create order"]):
+            has_new_order = True
+    
         negative_quotes = [(m, abs(d)) for m, d in deltas.items() if m != MINT and d < 0 and abs(d) > 1e-12]
         positive_quotes = [(m, abs(d)) for m, d in deltas.items() if m != MINT and d > 0 and abs(d) > 1e-12]
-
+    
         def pick_quote(cands):
-            if not cands: return None
-            pref = ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", WSOL_MINT]
+            if not cands:
+                return None
+            pref = [
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+                "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+                WSOL_MINT,
+            ]
             for p in pref:
                 for mint, _ in cands:
-                    if mint == p: return mint
+                    if mint == p:
+                        return mint
             return max(cands, key=lambda x: x[1])[0]
-
+    
         def quote_usd(mint, abs_amt):
-            if not mint or abs_amt <= 0: return 0.0
-            if mint in ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"): return abs_amt
-            if mint == WSOL_MINT: return abs_amt * ms.sol_price_usd
+            if not mint or abs_amt <= 0:
+                return 0.0
+            if mint in (
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+                "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+            ):
+                return abs_amt
+            if mint == WSOL_MINT:
+                return abs_amt * ms.sol_price_usd
             return 0.0
-
+    
         def ex_names(hits):
             return ", ".join(
                 exchange_name(p) if p in EXCHANGE_REGISTRY
                 else self._learned.get(p, {}).get("name", f"Learned ({p[:8]}…)")
-                for p in sorted(hits))
-
+                for p in sorted(hits)
+            )
+    
         # 1. CANCEL
         if limit_hits and has_cancel:
             return OrderType.CANCEL_LIMIT, {
-                "wallet": signer, "signature": tx_data.get("signature", ""),
-                "exchange": ex_names(limit_hits), "quote_token": ""}
-
+                "wallet": signer,
+                "signature": tx_data.get("signature", ""),
+                "exchange": ex_names(limit_hits),
+                "quote_token": "",
+            }
+    
         # 2. Executed market trade
         if abs(target_delta) > 1e-12:
             usd_value, quote_symbol = self._derive_trade_value_from_flows(
-                deltas, ms, target_delta, sol_spent, sol_received)
-            has_buy  = target_delta > 0 and (any(d < 0 for m, d in deltas.items() if m != MINT) or sol_spent > 0.001)
-            has_sell = target_delta < 0 and (any(d > 0 for m, d in deltas.items() if m != MINT) or sol_received > 0.001)
-            exchange_hits = sorted(market_hits | limit_hits)
+                deltas, ms, target_delta, sol_spent, sol_received
+            )
+    
+            has_buy = target_delta > 0 and (
+                any(d < 0 for m, d in deltas.items() if m != MINT) or sol_spent > 0.001
+            )
+            has_sell = target_delta < 0 and (
+                any(d > 0 for m, d in deltas.items() if m != MINT) or sol_received > 0.001
+            )
+    
             if has_buy:
                 return OrderType.MARKET_BUY, {
-                    "wallet": signer, "amount": abs(target_delta),
-                    "usd_value": usd_value, "exchange": ex_names(market_hits | limit_hits),
-                    "quote_token": quote_symbol}
+                    "wallet": signer,
+                    "amount": abs(target_delta),
+                    "usd_value": usd_value,
+                    "exchange": ex_names(market_hits | limit_hits),
+                    "quote_token": quote_symbol,
+                }
+    
             if has_sell:
                 return OrderType.MARKET_SELL, {
-                    "wallet": signer, "amount": abs(target_delta),
-                    "usd_value": usd_value, "exchange": ex_names(market_hits | limit_hits),
-                    "quote_token": quote_symbol}
-
+                    "wallet": signer,
+                    "amount": abs(target_delta),
+                    "usd_value": usd_value,
+                    "exchange": ex_names(market_hits | limit_hits),
+                    "quote_token": quote_symbol,
+                }
+    
         # 3. LIMIT BUY
         if limit_hits and abs(target_delta) < 1e-12:
-            has_placement = has_new_order or any(k in logs_lc for k in ["place", "init", "create"])
+            has_placement = has_new_order or any(k in logs_lc for k in ["place", "init", "create", "order", "limit"])
             if has_placement:
                 quote_mint = pick_quote(negative_quotes)
-                usd_value  = quote_usd(quote_mint, abs(deltas.get(quote_mint, 0.0)))
+                usd_value = quote_usd(quote_mint, abs(deltas.get(quote_mint, 0.0)))
+                
                 if usd_value < 5.0:
                     s_sol, _ = self._signer_sol_flows(tx_data, signer)
                     if s_sol > 0.02:
                         usd_value = s_sol * ms.sol_price_usd
-                if usd_value >= 5.0:
-                    # Compute token amount from USD value using current price
-                    amount = usd_value / ms.current_price if ms.current_price > 0 else 0.0
-                    if amount <= 0:
-                        return OrderType.UNKNOWN, None
-        
-                    # Build AMM from current market state
-                    amm = build_amm_from_market_state(ms)
-                    if not amm or amm.token_reserve <= 0 or amm.sol_reserve <= 0:
-                        return OrderType.UNKNOWN, None
-        
-                    # Constant product calculation for buying 'amount' tokens
-                    # pool state before trade
-                    R_token = amm.token_reserve   # token reserve (XERIS)
-                    R_sol   = amm.sol_reserve     # SOL reserve
-                    k = R_token * R_sol
-        
-                    # After buying 'amount' tokens, token reserve decreases
-                    new_R_token = R_token - amount
-                    if new_R_token <= 0:
-                        # Not enough liquidity – ignore this order
-                        return OrderType.UNKNOWN, None
-        
-                    new_R_sol = k / new_R_token
-                    sol_needed = new_R_sol - R_sol   # SOL required to buy 'amount' tokens
-        
-                    # New price (in SOL per token)
-                    new_price_sol = new_R_sol / new_R_token
-                    new_price_usd = new_price_sol * ms.sol_price_usd
-        
-                    # New market cap
-                    if ms.total_supply > 0:
-                        new_mcap = new_price_usd * ms.total_supply
-                    else:
-                        # Fallback: scale current market cap by price change
-                        new_mcap = ms.current_market_cap * (new_price_usd / ms.current_price)
-        
-                    predicted_mcap = new_mcap
-        
-                    return OrderType.LIMIT_BUY, {
-                        "wallet": signer,
-                        "amount": amount,
-                        "usd_value": usd_value,
-                        "target_price": new_price_usd,
-                        "predicted_mcap": predicted_mcap,
-                        "exchange": ex_names(limit_hits),
-                        "quote_token": KNOWN_TOKEN_LABELS.get(quote_mint, f"{quote_mint[:8]}…" if quote_mint else "")
-                    }
-
+                
+                quote_amount = usd_to_quote_amount(usd_value, ms)
+                proj = project_limit_buy(quote_amount, ms)
+                if not proj:
+                    return OrderType.UNKNOWN, None
+                
+                return OrderType.LIMIT_BUY, {
+                    "wallet": signer,
+                    "amount": proj["tokens_bought"],
+                    "usd_value": usd_value,
+                    "target_price": proj["new_price_usd"],
+                    "predicted_mcap": proj["new_mcap"],
+                    "exchange": ex_names(limit_hits),
+                    "quote_token": KNOWN_TOKEN_LABELS.get(
+                        quote_mint,
+                        f"{quote_mint[:8]}…" if quote_mint else (ms.quote_symbol or "")
+                    ),
+                }
+    
         # 4. LIMIT SELL
         if limit_hits and target_delta < 0 and not market_hits:
             _, sol_rcv = self._signer_sol_flows(tx_data, signer)
-            if sol_rcv > 0.001: return OrderType.UNKNOWN, None
-            has_placement = has_new_order or any(k in logs_lc for k in ["place", "init", "create"])
-            if has_placement:
-                amount    = abs(target_delta)
-                usd_value = amount * ms.current_price
-                if usd_value >= 5.0:
-                    amm = build_amm_from_market_state(ms)
-                    if not amm:
-                        return OrderType.UNKNOWN, None
-        
-                    # For a limit sell, compute the market cap after selling 'amount' tokens
-                    proj = amm.sell_tokens(amount)
-                    predicted_mcap = proj.new_market_cap_usd
-        
-                    return OrderType.LIMIT_SELL, {
-                        "wallet": signer, "amount": amount, "usd_value": usd_value,
-                        "target_price": proj.new_price,
-                        "predicted_mcap": predicted_mcap,
-                        "exchange": ex_names(limit_hits), "quote_token": ""}
 
+            # If signer already received SOL, this looks filled/executed, not just placed
+            if sol_rcv > 0.001:
+                return OrderType.UNKNOWN, None
+
+            has_placement = has_new_order or any(
+                k in logs_lc for k in ["place", "init", "create", "order", "limit"]
+            )
+            if has_placement:
+                amount = abs(target_delta)
+                if amount <= 0:
+                    return OrderType.UNKNOWN, None
+
+                usd_value = amount * ms.current_price
+                if usd_value < 5.0:
+                    return OrderType.UNKNOWN, None
+
+                proj = project_limit_sell(amount, ms)
+                if not proj:
+                    return OrderType.UNKNOWN, None
+
+                return OrderType.LIMIT_SELL, {
+                    "wallet": signer,
+                    "amount": amount,
+                    "usd_value": usd_value,
+                    "target_price": proj["new_price_usd"],
+                    "predicted_mcap": proj["new_mcap"],
+                    "exchange": ex_names(limit_hits),
+                    "quote_token": ms.quote_symbol or "",
+                }
+    
         # 5. TRANSFER
         non_target = [m for m, d in deltas.items() if m != MINT and abs(d) > 1e-12]
         if abs(target_delta) > 1e-12 and not limit_hits and not market_hits and not non_target:
             return OrderType.TRANSFER, {
-                "wallet": signer, "amount": abs(target_delta),
+                "wallet": signer,
+                "amount": abs(target_delta),
                 "usd_value": abs(target_delta) * ms.current_price,
-                "to": "unknown", "quote_token": ""}
-
+                "to": "unknown",
+                "quote_token": "",
+            }
+    
         return OrderType.UNKNOWN, None
 
     async def _groq_classify(self, tx_data: Dict, signer: str, ms: MarketState,
@@ -1447,7 +1747,9 @@ class TransactionClassifier:
             if order_type in (OrderType.LIMIT_BUY, OrderType.LIMIT_SELL):
                 # ... (keep the existing USD/value estimation code) ...
                 info["amount"] = amount
-                info["usd_value"] = usd_value
+            if order_type in (OrderType.LIMIT_BUY, OrderType.LIMIT_SELL):
+                info["amount"] = groq_size_tokens if groq_size_tokens > 0 else amount
+                info["usd_value"] = groq_size_usd if groq_size_usd > 0 else info["amount"] * ms.current_price
             
                 if info["amount"] <= 0 or info["usd_value"] <= 0:
                     return OrderType.UNKNOWN, None, 0.0
@@ -1776,66 +2078,160 @@ def _build_limit_order_embed(order: LimitOrder, ms: MarketState,
         "footer": {"text": f"Limit Order Tracker · expires in 7 days · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
         "timestamp": get_timestamp()}
 
-def _build_whale_embed(tx_type: str, amount: float, wallet: str, usd_value: float,
-                        signature: str, ms: MarketState, quote_token: str = "", exchange: str = "") -> dict:
-    is_buy = tx_type == "BUY"; color = 0x10B981 if is_buy else 0xEF4444
-    amm    = build_amm_from_market_state(ms, fee_rate=0.0025)
-    if amm:
-        proj     = amm.buy_with_sol(usd_value / ms.sol_price_usd) if is_buy else amm.sell_tokens(amount)
-        new_mcap = proj.new_market_cap_usd; diff = new_mcap - ms.current_market_cap
-        impact   = proj.price_impact_pct
-    else:
-        new_mcap = ms.current_market_cap; diff = impact = 0.0
-    tier = ("💎 MEGA WHALE" if usd_value >= 50_000 else "🌊 WHALE" if usd_value >= 10_000
-            else "⭐ BIG FISH" if usd_value >= 5_000 else "💫 FISH")
-    pair_label = (f"{quote_token} → XERIS" if is_buy and quote_token
-                  else f"XERIS → {quote_token}" if not is_buy and quote_token
-                  else f"XERIS {'bought' if is_buy else 'sold'}")
+def _build_whale_embed(
+    tx_type: str,
+    amount: float,
+    wallet: str,
+    usd_value: float,
+    signature: str,
+    ms: MarketState,
+    quote_token: str = "",
+    exchange: str = "",
+) -> dict:
+    is_buy = tx_type == "BUY"
+    color = 0x10B981 if is_buy else 0xEF4444
+
+    snap = estimate_mcap_before_after_any_quote(
+        current_mcap=ms.current_market_cap,
+        usd_value=usd_value,
+        pool_quote_reserve_after=ms.pool_quote_reserve,
+        is_buy=is_buy,
+        ms=ms,
+    )
+
+    before_mcap = snap["before_mcap"]
+    after_mcap = snap["after_mcap"]
+    diff = snap["change_usd"]
+    impact = snap["change_pct"]
+    quote_amount = snap["quote_amount"]
+    quote_price_usd = snap["quote_price_usd"]
+
+    tier = (
+        "💎 MEGA WHALE" if usd_value >= 50_000 else
+        "🌊 WHALE" if usd_value >= 10_000 else
+        "⭐ BIG FISH" if usd_value >= 5_000 else
+        "💫 FISH"
+    )
+
+    pair_label = (
+        f"{quote_token} → XERIS" if is_buy and quote_token
+        else f"XERIS → {quote_token}" if not is_buy and quote_token
+        else f"XERIS {'bought' if is_buy else 'sold'}"
+    )
+
+    market_metrics = (
+        f"┌ Price: `${ms.current_price:.8f}`\n"
+        f"├ Before MCap: `{format_usd(before_mcap) if before_mcap > 0 else 'N/A'}`\n"
+        f"├ After MCap: `{format_usd(after_mcap)}`\n"
+        f"└ Change: `{'+' if diff >= 0 else ''}{format_usd(diff)}` ({impact:+.2f}%)"
+    )
+
+    quote_math = (
+        f"┌ Quote Token: `{ms.quote_symbol or '?'}`\n"
+        f"├ Quote/USD: `{quote_price_usd:.8f}`\n"
+        f"├ Trade Quote Amt: `{quote_amount:,.6f}`\n"
+        f"└ Quote Reserve After: `{ms.pool_quote_reserve:,.6f}`"
+    )
+
     return {
         "author": {"name": f"{tier} DETECTED"},
-        "title":  f"{'📈' if is_buy else '📉'} {tx_type} · {format_usd(usd_value)}",
-        "description": (f"```yaml\nPair:   {pair_label}\nTrade:  {format_tokens(amount)} XERIS\n"
-                        f"USD:    {format_usd(usd_value)}\nImpact: {impact:.2f}% of MCap\n"
-                        + (f"Via:    {exchange}\n" if exchange else "") + "```"),
-        "color":  color,
+        "title": f"{'📈' if is_buy else '📉'} {tx_type} · {format_usd(usd_value)}",
+        "description": (
+            f"```yaml\n"
+            f"Pair:   {pair_label}\n"
+            f"Trade:  {format_tokens(amount)} XERIS\n"
+            f"USD:    {format_usd(usd_value)}\n"
+            f"Impact: {impact:+.2f}%\n"
+            + (f"Via:    {exchange}\n" if exchange else "")
+            + "```"
+        ),
+        "color": color,
         "fields": [
-            {"name": "💰 Market Metrics",
-             "value": (f"┌ Price: `${ms.current_price:.8f}`\n"
-                       f"├ MCap: `{format_usd(ms.current_market_cap)}`\n"
-                       f"└ New MCap: `{format_usd(new_mcap)}` ({'+' if diff>=0 else ''}{format_usd(diff)})"),
-             "inline": False},
-            {"name": "👤 Wallet", "value": f"```{wallet}```", "inline": False},
-            {"name": "🔗 Links",
-             "value": f"[TX](https://solscan.io/tx/{signature}) · [Wallet](https://solscan.io/account/{wallet}) · [Chart](https://dexscreener.com/solana/{MINT})",
-             "inline": False}],
+            {
+                "name": "💰 Market Metrics",
+                "value": market_metrics,
+                "inline": False,
+            },
+            {
+                "name": "🏊 Quote Math",
+                "value": quote_math,
+                "inline": False,
+            },
+            {
+                "name": "👤 Wallet",
+                "value": f"```{wallet}```",
+                "inline": False,
+            },
+            {
+                "name": "🔗 Links",
+                "value": f"[TX](https://solscan.io/tx/{signature}) · [Wallet](https://solscan.io/account/{wallet}) · [Chart](https://dexscreener.com/solana/{MINT})",
+                "inline": False,
+            },
+        ],
         "footer": {"text": f"XerisBot · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
-        "timestamp": get_timestamp()}
+        "timestamp": get_timestamp(),
+    }
 
 def _build_dev_sell_embed(amount: float, wallet: str, usd_value: float, signature: str,
                            ms: MarketState, quote_token: str = "") -> dict:
-    amm    = build_amm_from_market_state(ms, fee_rate=0.0025)
-    proj   = amm.sell_tokens(amount) if amm else None
-    new_mcap = proj.new_market_cap_usd if proj else ms.current_market_cap
-    impact   = abs(proj.price_impact_pct) if proj else 0.0
+    snap = estimate_mcap_before_after_any_quote(
+        current_mcap=ms.current_market_cap,
+        usd_value=usd_value,
+        pool_quote_reserve_after=ms.pool_quote_reserve,
+        is_buy=False,
+        ms=ms,
+    )
+
+    before_mcap = snap["before_mcap"]
+    after_mcap = snap["after_mcap"]
+    diff = snap["change_usd"]
+    impact = abs(snap["change_pct"])
+
     return {
-        "author": {"name": "⚠️ DEVELOPER ACTIVITY ALERT"}, "title": "🚨 Dev Wallet Sell Detected",
-        "description": (f"```diff\n- Developer has executed a SELL transaction\n```\n"
-                        f"**⚠️ Monitor price action closely**\n> Amount: **{format_usd(usd_value)}** ({impact:.2f}% of MCap)"),
+        "author": {"name": "⚠️ DEVELOPER ACTIVITY ALERT"},
+        "title": "🚨 Dev Wallet Sell Detected",
+        "description": (
+            f"```diff\n- Developer has executed a SELL transaction\n```\n"
+            f"**⚠️ Monitor price action closely**\n"
+            f"> Amount: **{format_usd(usd_value)}** ({impact:.2f}% estimated mcap move)"
+        ),
         "color": 0xDC2626,
         "fields": [
-            {"name": "💸 Details",
-             "value": (f"```yaml\nPair:   XERIS → {quote_token or '?'}\nTokens: {format_tokens(amount)} XERIS\n"
-                       f"USD:    {format_usd(usd_value)}\nImpact: {impact:.2f}%\n```"),
-             "inline": False},
-            {"name": "📊 MCap Impact",
-             "value": f"┌ Before: `{format_usd(ms.current_market_cap)}`\n└ After:  `{format_usd(new_mcap)}`",
-             "inline": False},
-            {"name": "👤 Dev Wallet", "value": f"```{wallet}```", "inline": False},
-            {"name": "🔍 Links",
-             "value": f"[TX](https://solscan.io/tx/{signature}) · [Wallet](https://solscan.io/account/{wallet}) · [Chart](https://dexscreener.com/solana/{MINT})",
-             "inline": False}],
+            {
+                "name": "💸 Details",
+                "value": (
+                    f"```yaml\n"
+                    f"Pair:   XERIS → {quote_token or ms.quote_symbol or '?'}\n"
+                    f"Tokens: {format_tokens(amount)} XERIS\n"
+                    f"USD:    {format_usd(usd_value)}\n"
+                    f"Impact: {impact:.2f}%\n"
+                    f"```"
+                ),
+                "inline": False,
+            },
+            {
+                "name": "📊 MCap Impact",
+                "value": (
+                    f"┌ Before: `{format_usd(before_mcap) if before_mcap > 0 else 'N/A'}`\n"
+                    f"├ After:  `{format_usd(after_mcap)}`\n"
+                    f"└ Change: `{'+' if diff >= 0 else ''}{format_usd(diff)}`"
+                ),
+                "inline": False,
+            },
+            {
+                "name": "👤 Dev Wallet",
+                "value": f"```{wallet}```",
+                "inline": False,
+            },
+            {
+                "name": "🔍 Links",
+                "value": f"[TX](https://solscan.io/tx/{signature}) · [Wallet](https://solscan.io/account/{wallet}) · [Chart](https://dexscreener.com/solana/{MINT})",
+                "inline": False,
+            },
+        ],
         "footer": {"text": f"Dev Monitor · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"},
-        "timestamp": get_timestamp()}
+        "timestamp": get_timestamp(),
+    }
 
 def _build_price_embed(pct: float, ref: float, ms: MarketState) -> dict:
     is_pump = pct > 0; sign = "+" if is_pump else ""
