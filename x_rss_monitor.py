@@ -1,18 +1,3 @@
-"""
-x_rss_monitor.py
-────────────────
-Monitors X (Twitter) accounts for new posts and relays them to Discord.
-
-Channel routing:
-  • Default account (XerisCoin) → X_ANNOUNCE_CHANNEL_ID  (your X announcements channel)
-  • Raided accounts             → RAID_CHANNEL_ID         (your raid / alpha channel)
-  • Or specify a channel per account: !raid @username #channel-id
-
-Commands:
-  !raid @username [channel_id]  — add account (max 3), optional target channel
-  !unraid @username             — remove a watched account (default cannot be removed)
-  !raidlist                     — show all watched accounts + their target channels
-"""
 
 from __future__ import annotations
 
@@ -30,23 +15,10 @@ from helpers.database import DatabaseManager
 from helpers.discord_utils import send_message, send_message_with_image
 from helpers.formatters import get_timestamp
 
-# ── Channel config ─────────────────────────────────────────────────────────────
 
-# Where XerisCoin's own posts go (your X announcements channel)
-X_ANNOUNCE_CHANNEL_ID: int = 1483822900795670678   # ← change to your announcements channel ID
-
-# Where raided/watched accounts' posts go (separate raid/alpha channel)
-RAID_CHANNEL_ID: int = 1481659347460161607          # ← change to your raid channel ID
-
-# ── Account config ─────────────────────────────────────────────────────────────
-
-# The hardcoded default — always seeded, cannot be removed, posts to X_ANNOUNCE_CHANNEL_ID
 DEFAULT_X_ACCOUNT = "XerisCoin"
 
-# How often to poll each account (seconds)
-POLL_INTERVAL = 60
-
-# Max total watched accounts (including the default)
+POLL_INTERVAL = 90
 MAX_ACCOUNTS = 3
 
 # ── RSS sources ────────────────────────────────────────────────────────────────
@@ -64,8 +36,9 @@ NITTER_INSTANCES = [
     "https://nitter.42l.fr",
 ]
 
-# Your self-hosted RSSHub instance — set "" to skip
-RSSHUB_INSTANCE = "https://rsshub-production-69fe.up.railway.app"
+X_ANNOUNCE_CHANNEL_ID = int(os.getenv("X_ANNOUNCE_CHANNEL_ID", "0"))
+RAID_CHANNEL_ID       = int(os.getenv("RAID_CHANNEL_ID", "0"))
+RSSHUB_INSTANCE       = os.getenv("RSSHUB_INSTANCE", "https://rsshub.app")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # RSS fetching
@@ -243,20 +216,21 @@ async def _check_account(row: Dict, db: DatabaseManager) -> None:
     if not xml_text:
         return
 
-    posts = _parse_rss_posts(xml_text)
+    posts = _parse_rss_posts(xml_text)  # sorted oldest → newest
     if not posts:
         return
 
     state        = await db.get_x_watch_state(username)
     last_post_id = (state or {}).get("last_post_id", "")
-    latest       = posts[-1]
+    latest       = posts[-1]  # newest post
 
-    # First run or no saved state — just save the latest post ID, send nothing
+    print(f"   🔍 @{username} | saved={last_post_id[:20] if last_post_id else 'none'} | latest={latest['post_id'][:20]}")
+
+    # First run — save latest ID, send nothing
     if not last_post_id:
-        print(f"   📌 First run for @{username} — saving latest post ID, no alert sent")
+        print(f"   📌 First run @{username} — saved latest ID, no alert sent")
         await db.upsert_x_watch_state(
-            username=username,
-            user_id="",
+            username=username, user_id="",
             last_post_id=latest["post_id"],
             last_post_time=str(latest["timestamp"]),
         )
@@ -264,41 +238,44 @@ async def _check_account(row: Dict, db: DatabaseManager) -> None:
 
     # Already up to date
     if latest["post_id"] == last_post_id:
+        print(f"   ✓ @{username} — no new posts")
         return
 
-    # Collect only posts newer than the last saved one
+    # Collect posts NEWER than last_post_id
+    # posts is oldest→newest, so iterate in reverse until we hit the saved ID
     new_posts = []
-    for p in posts:
+    for p in reversed(posts):
         if p["post_id"] == last_post_id:
             break
         new_posts.append(p)
+    # new_posts is currently newest→oldest, flip to oldest→newest for sending
+    new_posts.reverse()
 
     if not new_posts:
-        # IDs don't match but nothing found — update to latest to avoid re-checking
+        # last_post_id not found in feed at all — feed scrolled past it
+        # just save the latest and move on
+        print(f"   ⚠️ @{username} — saved ID not found in feed, updating to latest")
         await db.upsert_x_watch_state(
-            username=username,
-            user_id="",
+            username=username, user_id="",
             last_post_id=latest["post_id"],
             last_post_time=str(latest["timestamp"]),
         )
         return
 
-    # Save state first before sending (prevents re-alerting on crash)
+    print(f"   📢 {len(new_posts)} new post(s) from @{username} → ch:{channel_id}")
+
+    # Save new latest ID first (prevents duplicate alerts on restart)
     await db.upsert_x_watch_state(
-        username=username,
-        user_id="",
+        username=username, user_id="",
         last_post_id=latest["post_id"],
         last_post_time=str(latest["timestamp"]),
     )
 
-    print(f"   📢 {len(new_posts)} new post(s) from @{username} → ch:{channel_id}")
-
-    # Send newest last, cap at 3 to avoid spam
+    # Send up to 3, skip if older than 1 hour
     for post in new_posts[-3:]:
-        # Only alert if the post is < 2 minutes old
         age_seconds = time.time() - post["timestamp"]
         if post["timestamp"] > 0 and age_seconds > 3600:
-            print(f"   ⏩ Skipping post ({int(age_seconds)}s old) from @{username} — too old")
+            print(f"   ⏩ @{username} — skipping post ({int(age_seconds)}s old)")
             continue
 
         embed = _build_post_embed(username, post, is_default=is_default)
