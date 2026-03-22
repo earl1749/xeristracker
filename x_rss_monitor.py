@@ -49,7 +49,7 @@ NITTER_INSTANCES = [
 ]
 
 # Your self-hosted RSSHub instance — set "" to skip
-RSSHUB_INSTANCE = "https://rsshub.app"
+RSSHUB_INSTANCE = "https://rsshub-production-69fe.up.railway.app"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # RSS fetching
@@ -57,8 +57,8 @@ RSSHUB_INSTANCE = "https://rsshub.app"
 
 def _strip_at(username: str) -> str:
     return username.lstrip("@").strip().lower()
-
-
+ 
+ 
 async def _try_url(client: httpx.AsyncClient, url: str) -> Optional[str]:
     try:
         r = await client.get(url, headers={"User-Agent": "Mozilla/5.0 XerisBot/2.0"})
@@ -67,8 +67,8 @@ async def _try_url(client: httpx.AsyncClient, url: str) -> Optional[str]:
     except Exception:
         pass
     return None
-
-
+ 
+ 
 async def _fetch_rss(username: str) -> Optional[str]:
     async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
         for base in NITTER_INSTANCES:
@@ -83,12 +83,12 @@ async def _fetch_rss(username: str) -> Optional[str]:
                 return result
     print(f"   ⚠️ All RSS sources failed for @{username} — will retry next cycle")
     return None
-
-
+ 
+ 
 # ═════════════════════════════════════════════════════════════════════════════
 # RSS parsing
 # ═════════════════════════════════════════════════════════════════════════════
-
+ 
 def _parse_timestamp(pub_str: str) -> int:
     """Try multiple date formats used by nitter/RSSHub."""
     formats = [
@@ -103,8 +103,8 @@ def _parse_timestamp(pub_str: str) -> int:
         except Exception:
             continue
     return 0
-
-
+ 
+ 
 def _clean_content(raw: str) -> str:
     """Strip HTML tags and clean up whitespace from RSS content."""
     # Remove HTML tags
@@ -115,8 +115,8 @@ def _clean_content(raw: str) -> str:
     # Collapse whitespace
     text = re.sub(r"\s+", " ", text).strip()
     return text
-
-
+ 
+ 
 def _parse_rss_posts(xml_text: str) -> List[Dict]:
     posts = []
     try:
@@ -129,30 +129,30 @@ def _parse_rss_posts(xml_text: str) -> List[Dict]:
             title   = (item.findtext("title")   or "").strip()
             link    = (item.findtext("link")    or "").strip()
             pub_str = (item.findtext("pubDate") or "").strip()
-
+ 
             # Get full post content — prefer content:encoded, fallback to description, then title
             content_encoded = item.findtext("content:encoded", namespaces=ns) or ""
             description     = item.findtext("description") or ""
             raw_content     = content_encoded or description or title
             content         = _clean_content(raw_content)
-
+ 
             # If content is empty or just a URL, fall back to title
             if not content or content.startswith("http"):
                 content = _clean_content(title)
-
+ 
             # Trim to 500 chars
             if len(content) > 500:
                 content = content[:497] + "…"
-
+ 
             # Extract image
             media_content = item.find("media:content", ns)
             image_url = media_content.get("url") if media_content is not None else None
-
+ 
             if not guid:
                 continue
-
+ 
             ts = _parse_timestamp(pub_str)
-
+ 
             # Extract numeric post ID from guid or link (most reliable unique key)
             post_id = ""
             m = re.search(r"/status/(\d+)", guid + " " + link)
@@ -161,7 +161,7 @@ def _parse_rss_posts(xml_text: str) -> List[Dict]:
             else:
                 # fallback: use full guid
                 post_id = guid
-
+ 
             posts.append({
                 "post_id":   post_id,
                 "content":   content,
@@ -171,25 +171,25 @@ def _parse_rss_posts(xml_text: str) -> List[Dict]:
             })
     except Exception as e:
         print(f"   ⚠️ RSS parse error: {e}")
-
+ 
     posts.sort(key=lambda p: p["timestamp"])
     return posts
-
-
+ 
+ 
 # ═════════════════════════════════════════════════════════════════════════════
 # Embed builder
 # ═════════════════════════════════════════════════════════════════════════════
-
+ 
 def _build_post_embed(username: str, post: Dict, is_default: bool = False) -> dict:
     content = post["content"]
     link    = post["link"]
     ts      = post["timestamp"]
     dt_str  = (datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
                if ts else "Unknown")
-
+ 
     color  = 0x10B981 if is_default else 0x1D9BF0
     prefix = "📢" if is_default else "🎯"
-
+ 
     return {
         "author":      {"name": f"{prefix} @{username} posted on X", "url": f"https://x.com/{username}"},
         "description": f"{content}\n\n🔗 {link}",
@@ -197,12 +197,12 @@ def _build_post_embed(username: str, post: Dict, is_default: bool = False) -> di
         "footer":      {"text": f"X Monitor · @{username} · {dt_str}"},
         "timestamp":   get_timestamp(),
     }
-
-
+ 
+ 
 # ═════════════════════════════════════════════════════════════════════════════
 # Per-account polling
 # ═════════════════════════════════════════════════════════════════════════════
-
+ 
 def _resolve_channel(row: Dict) -> int:
     """
     Pick the right Discord channel for this account:
@@ -216,25 +216,25 @@ def _resolve_channel(row: Dict) -> int:
     if row["username"].lower() == DEFAULT_X_ACCOUNT.lower():
         return X_ANNOUNCE_CHANNEL_ID
     return RAID_CHANNEL_ID
-
-
+ 
+ 
 async def _check_account(row: Dict, db: DatabaseManager) -> None:
     username   = row["username"]
     channel_id = _resolve_channel(row)
     is_default = username.lower() == DEFAULT_X_ACCOUNT.lower()
-
+ 
     xml_text = await _fetch_rss(username)
     if not xml_text:
         return
-
+ 
     posts = _parse_rss_posts(xml_text)
     if not posts:
         return
-
+ 
     state        = await db.get_x_watch_state(username)
     last_post_id = (state or {}).get("last_post_id", "")
     latest       = posts[-1]
-
+ 
     # First run or no saved state — just save the latest post ID, send nothing
     if not last_post_id:
         print(f"   📌 First run for @{username} — saving latest post ID, no alert sent")
@@ -245,18 +245,18 @@ async def _check_account(row: Dict, db: DatabaseManager) -> None:
             last_post_time=str(latest["timestamp"]),
         )
         return
-
+ 
     # Already up to date
     if latest["post_id"] == last_post_id:
         return
-
+ 
     # Collect only posts newer than the last saved one
     new_posts = []
     for p in posts:
         if p["post_id"] == last_post_id:
             break
         new_posts.append(p)
-
+ 
     if not new_posts:
         # IDs don't match but nothing found — update to latest to avoid re-checking
         await db.upsert_x_watch_state(
@@ -266,7 +266,7 @@ async def _check_account(row: Dict, db: DatabaseManager) -> None:
             last_post_time=str(latest["timestamp"]),
         )
         return
-
+ 
     # Save state first before sending (prevents re-alerting on crash)
     await db.upsert_x_watch_state(
         username=username,
@@ -274,11 +274,17 @@ async def _check_account(row: Dict, db: DatabaseManager) -> None:
         last_post_id=latest["post_id"],
         last_post_time=str(latest["timestamp"]),
     )
-
+ 
     print(f"   📢 {len(new_posts)} new post(s) from @{username} → ch:{channel_id}")
-
+ 
     # Send newest last, cap at 3 to avoid spam
     for post in new_posts[-3:]:
+        # Only alert if the post is < 2 minutes old
+        age_seconds = time.time() - post["timestamp"]
+        if post["timestamp"] > 0 and age_seconds > 120:
+            print(f"   ⏩ Skipping post ({int(age_seconds)}s old) from @{username} — too old")
+            continue
+ 
         embed = _build_post_embed(username, post, is_default=is_default)
         if post.get("image_url"):
             await send_message_with_image(
@@ -289,25 +295,25 @@ async def _check_account(row: Dict, db: DatabaseManager) -> None:
         else:
             await send_message(channel_id, embeds=[embed])
         await asyncio.sleep(1.5)
-
-
+ 
+ 
 # ═════════════════════════════════════════════════════════════════════════════
 # Main monitor coroutine
 # ═════════════════════════════════════════════════════════════════════════════
-
+ 
 async def x_post_monitor(db: DatabaseManager) -> None:
     print("\n🐦 Starting X post monitor...")
-
+ 
     # Seed the default account
     existing = await db.get_x_watch_state(DEFAULT_X_ACCOUNT.lower())
     if not existing:
         await db.add_x_watch(DEFAULT_X_ACCOUNT.lower(), added_by="system")
         print(f"   ✅ Seeded default X account: @{DEFAULT_X_ACCOUNT} → ch:{X_ANNOUNCE_CHANNEL_ID}")
-
+ 
     print(f"   📡 Polling every {POLL_INTERVAL}s · max {MAX_ACCOUNTS} accounts")
     print(f"   📣 Default channel : {X_ANNOUNCE_CHANNEL_ID}")
     print(f"   🎯 Raid channel    : {RAID_CHANNEL_ID}")
-
+ 
     while True:
         try:
             accounts = await db.get_all_x_watched()
@@ -320,12 +326,12 @@ async def x_post_monitor(db: DatabaseManager) -> None:
         except Exception as e:
             print(f"❌ X monitor error: {e}")
         await asyncio.sleep(POLL_INTERVAL)
-
-
+ 
+ 
 # ═════════════════════════════════════════════════════════════════════════════
 # Raid command handler
 # ═════════════════════════════════════════════════════════════════════════════
-
+ 
 async def handle_raid_command(
     command: str,
     parts: List[str],
@@ -335,7 +341,7 @@ async def handle_raid_command(
 ) -> None:
     if command == "!raidlist":
         await _cmd_raidlist(channel_id, db)
-
+ 
     elif command == "!raid":
         raw_arg = parts[1].strip() if len(parts) > 1 else ""
         username = _strip_at(raw_arg)
@@ -355,7 +361,7 @@ async def handle_raid_command(
                 await send_message(channel_id, content="❌ Invalid channel ID. Use the numeric channel ID.")
                 return
         await _cmd_raid_add(channel_id, username, author.get("username", "Unknown"), db, target_channel)
-
+ 
     elif command == "!unraid":
         raw_arg = parts[1].strip() if len(parts) > 1 else ""
         username = _strip_at(raw_arg)
@@ -363,10 +369,10 @@ async def handle_raid_command(
             await send_message(channel_id, content="❌ Usage: `!unraid @username`")
             return
         await _cmd_raid_remove(channel_id, username, db)
-
-
+ 
+ 
 # ── !raidlist ──────────────────────────────────────────────────────────────────
-
+ 
 async def _cmd_raidlist(channel_id: int, db: DatabaseManager) -> None:
     accounts = await db.get_all_x_watched()
     if not accounts:
@@ -376,7 +382,7 @@ async def _cmd_raidlist(channel_id: int, db: DatabaseManager) -> None:
             "color":       0x6B7280,
         }])
         return
-
+ 
     rows = []
     for i, row in enumerate(accounts):
         uname      = row["username"]
@@ -387,7 +393,7 @@ async def _cmd_raidlist(channel_id: int, db: DatabaseManager) -> None:
         added_by   = row.get("added_by", "system")
         source     = "system default" if is_default else f"added by @{added_by}"
         rows.append(f"`{i+1}.` **@{uname}**{lock} → {ch_label} — {source}")
-
+ 
     await send_message(channel_id, embeds=[{
         "author":      {"name": "🐦 X Account Watch List"},
         "title":       f"{len(accounts)}/{MAX_ACCOUNTS} slots used",
@@ -407,10 +413,10 @@ async def _cmd_raidlist(channel_id: int, db: DatabaseManager) -> None:
         "footer":    {"text": f"X Monitor · polls every {POLL_INTERVAL}s"},
         "timestamp": get_timestamp(),
     }])
-
-
+ 
+ 
 # ── !raid add ──────────────────────────────────────────────────────────────────
-
+ 
 async def _cmd_raid_add(
     channel_id: int,
     username: str,
@@ -432,7 +438,7 @@ async def _cmd_raid_add(
             "color": 0xEF4444,
         }])
         return
-
+ 
     existing = await db.get_x_watch_state(username)
     if existing:
         await send_message(channel_id, embeds=[{
@@ -441,7 +447,7 @@ async def _cmd_raid_add(
             "color":       0xF59E0B,
         }])
         return
-
+ 
     await send_message(channel_id, content=f"🔍 Verifying `@{username}` exists on X...")
     xml_text = await _fetch_rss(username)
     if not xml_text:
@@ -454,14 +460,14 @@ async def _cmd_raid_add(
             "color": 0xEF4444,
         }])
         return
-
+ 
     # Determine destination channel
     dest_channel = target_channel or RAID_CHANNEL_ID
     ch_label     = f"<#{dest_channel}> (`{dest_channel}`)"
-
+ 
     await db.add_x_watch(username, added_by=added_by, channel_id=dest_channel)
     count_after = await db.count_x_watched()
-
+ 
     await send_message(channel_id, embeds=[{
         "author":      {"name": "✅ X Account Added"},
         "title":       f"@{username} is now being monitored",
@@ -478,10 +484,10 @@ async def _cmd_raid_add(
         "footer":    {"text": "Use !raidlist to see all watched accounts"},
         "timestamp": get_timestamp(),
     }])
-
-
+ 
+ 
 # ── !unraid remove ─────────────────────────────────────────────────────────────
-
+ 
 async def _cmd_raid_remove(channel_id: int, username: str, db: DatabaseManager) -> None:
     if username.lower() == DEFAULT_X_ACCOUNT.lower():
         await send_message(channel_id, embeds=[{
@@ -490,7 +496,7 @@ async def _cmd_raid_remove(channel_id: int, username: str, db: DatabaseManager) 
             "color":       0xF59E0B,
         }])
         return
-
+ 
     removed = await db.remove_x_watch(username)
     if not removed:
         await send_message(channel_id, embeds=[{
@@ -499,7 +505,7 @@ async def _cmd_raid_remove(channel_id: int, username: str, db: DatabaseManager) 
             "color":       0xEF4444,
         }])
         return
-
+ 
     count_after = await db.count_x_watched()
     await send_message(channel_id, embeds=[{
         "author":      {"name": "🗑️ X Account Removed"},
@@ -510,6 +516,9 @@ async def _cmd_raid_remove(channel_id: int, username: str, db: DatabaseManager) 
             {"name": "📊 Slots Used",  "value": f"`{count_after}/{MAX_ACCOUNTS}`", "inline": True},
             {"name": "➕ Add Another", "value": "Use `!raid @username`",            "inline": True},
         ],
+        "footer":    {"text": "Use !raidlist to see all watched accounts"},
+        "timestamp": get_timestamp(),
+    }])
         "footer":    {"text": "Use !raidlist to see all watched accounts"},
         "timestamp": get_timestamp(),
     }])
