@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import asyncio
+import html
 import os as _os
 import re
 import xml.etree.ElementTree as ET
@@ -18,10 +20,10 @@ from config.settings import (
     X_INCLUDE_RETWEETS,
 )
 
-
-# ── RSS sources ───────────────────────────────────────────────────────────────
-
-_RSSHUB_SELF = _os.getenv("RSSHUB_URL", "https://rsshub-production-69fe.up.railway.app").rstrip("/")
+_RSSHUB_SELF = _os.getenv(
+    "RSSHUB_URL",
+    "https://rsshub-production-69fe.up.railway.app",
+).rstrip("/")
 
 _RSS_SOURCES = [
     *([f"{_RSSHUB_SELF}/twitter/user/{{username}}"] if _RSSHUB_SELF else []),
@@ -36,8 +38,6 @@ _HEADERS = {
     "Accept": "application/rss+xml, application/xml, text/xml, */*",
 }
 
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _numeric_id(value: str) -> int:
     try:
@@ -55,7 +55,64 @@ def _pick_newest(items: list[dict]) -> Optional[dict]:
     )
 
 
-# ── RSS fetch ────────────────────────────────────────────────────────────────
+def _extract_post_id_from_link(link: str) -> Optional[str]:
+    if not link:
+        return None
+
+    m = re.search(r"/status(?:es)?/(\d+)", link)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def _extract_first_image_url(raw_html: str) -> Optional[str]:
+    if not raw_html:
+        return None
+
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', raw_html, re.IGNORECASE)
+    if m:
+        return html.unescape(m.group(1).strip())
+
+    return None
+
+
+def _strip_html(raw_html: str) -> str:
+    if not raw_html:
+        return ""
+
+    text = raw_html
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _normalize_post_text(title: str, description: str) -> str:
+    desc_text = _strip_html(description).strip()
+    title = html.unescape((title or "").strip())
+
+    if desc_text and desc_text != title:
+        return desc_text
+
+    return title
+
+
+def _truncate_for_discord(text: str, limit: int = 1500) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _id_gt(a: str, b: str) -> bool:
+    try:
+        return int(a) > int(b)
+    except Exception:
+        return a > b
+
 
 async def _fetch_rss(client: httpx.AsyncClient, url: str) -> Optional[str]:
     try:
@@ -64,12 +121,12 @@ async def _fetch_rss(client: httpx.AsyncClient, url: str) -> Optional[str]:
         if r.status_code == 200 and "<item" in r.text:
             return r.text
 
-        print(f"   ⚠️  RSS {r.status_code} from {url}")
+        print(f"   ⚠️ RSS {r.status_code} from {url}")
         return None
 
     except Exception as e:
         host = url.split("/")[2] if "://" in url else url
-        print(f"   ⚠️  RSS error ({host}): {e}")
+        print(f"   ⚠️ RSS error ({host}): {e}")
         return None
 
 
@@ -78,14 +135,12 @@ async def _fetch_with_fallback(client: httpx.AsyncClient, username: str) -> Opti
         url = template.format(username=username)
         xml = await _fetch_rss(client, url)
         if xml:
-            print(f"   ✅  RSS via {url.split('/')[2]}")
+            print(f"   ✅ RSS via {url.split('/')[2]}")
             return xml
 
-    print(f"   ❌  All RSS sources failed for @{username}")
+    print(f"   ❌ All RSS sources failed for @{username}")
     return None
 
-
-# ── RSS parser ───────────────────────────────────────────────────────────────
 
 def _parse_items(xml_text: str) -> list[dict]:
     items: list[dict] = []
@@ -99,12 +154,12 @@ def _parse_items(xml_text: str) -> list[dict]:
             link = (item.findtext("link") or "").strip()
             pub_date = (item.findtext("pubDate") or "").strip()
             guid = (item.findtext("guid") or link).strip()
+            description = (item.findtext("description") or "").strip()
 
             tweet_id = ""
             for src in (link, guid):
-                m = re.search(r"/status(?:es)?/(\d+)", src)
-                if m:
-                    tweet_id = m.group(1)
+                tweet_id = _extract_post_id_from_link(src or "")
+                if tweet_id:
                     break
 
             if not tweet_id:
@@ -123,6 +178,9 @@ def _parse_items(xml_text: str) -> list[dict]:
                 except Exception:
                     pass
 
+            text = _normalize_post_text(title, description)
+            image_url = _extract_first_image_url(description)
+
             is_retweet = title.startswith("RT @")
             is_reply = (
                 title.startswith("R to @")
@@ -133,17 +191,18 @@ def _parse_items(xml_text: str) -> list[dict]:
             items.append(
                 {
                     "id": tweet_id,
-                    "text": title,
+                    "text": text,
                     "url": link,
                     "created_at": created_at,
                     "timestamp": ts,
                     "is_retweet": is_retweet,
                     "is_reply": is_reply,
+                    "image_url": image_url,
                 }
             )
 
     except ET.ParseError as e:
-        print(f"   ⚠️  RSS XML parse error: {e}")
+        print(f"   ⚠️ RSS XML parse error: {e}")
 
     return items
 
@@ -156,94 +215,76 @@ def _should_skip(item: dict) -> bool:
     return False
 
 
-def _id_gt(a: str, b: str) -> bool:
-    try:
-        return int(a) > int(b)
-    except Exception:
-        return a > b
-
-
-# ── Discord embed ────────────────────────────────────────────────────────────
-
-def _build_kol_embed(username: str, item: dict) -> dict:
-    # Import inside function to break circular import
-    from xeris import get_timestamp
+async def _send_post_to_discord(channel_id: int, item: dict, mention_everyone: bool = False) -> bool:
+    # import inside to avoid circular import
+    from xeris import send_message, send_message_with_image
 
     text = (item.get("text") or "").strip()
-    url = item.get("url") or f"https://x.com/{username}"
+    url = (item.get("url") or "").strip()
+    image_url = (item.get("image_url") or "").strip()
 
-    if item.get("is_retweet"):
-        label = "🔁 Reposted"
-        color = 0x1D9BF0
-    elif item.get("is_reply"):
-        label = "💬 Replied"
-        color = 0x6366F1
-    else:
-        label = "📢 New Post"
-        color = 0x1D9BF0
+    body_parts: list[str] = []
+    if text:
+        body_parts.append(_truncate_for_discord(text, 1500))
+    if url:
+        body_parts.append(f"Original post: {url}")
 
-    return {
-        "author": {
-            "name": f"{label} · @{username}",
-            "url": f"https://x.com/{username}",
-            "icon_url": "https://abs.twimg.com/favicons/twitter.3.ico",
-        },
-        "description": text[:4000] if text else "*No text*",
-        "color": color,
-        "fields": [
-            {
-                "name": "🔗",
-                "value": f"[Open on X]({url}) · [Profile](https://x.com/{username})",
-                "inline": False,
-            }
-        ],
-        "footer": {"text": f"X Watcher · @{username} · {item.get('created_at', '')}"},
-        "timestamp": get_timestamp(),
-    }
+    content = "\n\n".join(body_parts).strip()
+    if not content:
+        content = url or "New X post"
 
+    if image_url:
+        return await send_message_with_image(
+            channel_id=channel_id,
+            content=content,
+            image_url=image_url,
+            mention_everyone=mention_everyone,
+        )
 
-# ── Main monitor ─────────────────────────────────────────────────────────────
+    return await send_message(
+        channel_id,
+        content=content,
+        mention_everyone=mention_everyone,
+    )
+
 
 async def x_post_monitor(db) -> None:
-    # Import inside function to break circular import
-    from xeris import send_message, get_timestamp
-
     if not X_USERNAME or not X_CHANNEL_ID:
-        print("ℹ️  X watcher disabled — set X_USERNAME and X_CHANNEL_ID")
+        print("ℹ️ X watcher disabled — set X_USERNAME and X_CHANNEL_ID")
         return
 
-    print(f"🐦 KOL watcher started → @{X_USERNAME} → channel {X_CHANNEL_ID}")
+    print(f"🐦 X RSS watcher started → @{X_USERNAME} → channel {X_CHANNEL_ID}")
     print(
         f"   Poll every {X_POLL_SECONDS}s | "
         f"replies={X_INCLUDE_REPLIES} | RTs={X_INCLUDE_RETWEETS}"
     )
 
     last_seen_id: str = ""
-    recent_sent_ids: deque[str] = deque(maxlen=100)
+    recent_sent_ids: deque[str] = deque(maxlen=200)
 
     async with httpx.AsyncClient(
-        timeout=15.0,
+        timeout=20.0,
         follow_redirects=True,
         headers=_HEADERS,
     ) as client:
         state = await db.get_x_watch_state(X_USERNAME)
         if state:
-            last_seen_id = state.get("last_post_id", "")
-            print(f"   ▶  Resumed — last post ID: {last_seen_id or '(none)'}")
+            last_seen_id = (state.get("last_post_id") or "").strip()
+            print(f"   ▶ Resumed — last post ID: {last_seen_id or '(none)'}")
         else:
             xml = await _fetch_with_fallback(client, X_USERNAME)
             if xml:
-                valid_items = [i for i in _parse_items(xml) if not _should_skip(i)]
+                valid_items = [i for i in _parse_items(xml) if not _should_skip(i) and i.get("id")]
                 newest = _pick_newest(valid_items)
                 if newest:
                     last_seen_id = newest["id"]
                     await db.upsert_x_watch_state(
                         X_USERNAME,
-                        "",
+                        "rss",
                         last_seen_id,
                         newest.get("created_at", ""),
                     )
-                    print(f"   ✅  Initialized — seeded at post ID {last_seen_id}")
+                    print(f"   ✅ Initialized — seeded at post ID {last_seen_id}")
 
         while True:
             await asyncio.sleep(X_POLL_SECONDS)
@@ -274,29 +315,28 @@ async def x_post_monitor(db) -> None:
                 )
 
                 for post in new_posts:
-                    embed = _build_kol_embed(X_USERNAME, post)
-
-                    await send_message(
+                    ok = await _send_post_to_discord(
                         X_CHANNEL_ID,
-                        embeds=[embed],
+                        post,
                         mention_everyone=True,
                     )
 
-                    recent_sent_ids.append(post["id"])
-                    print(f"🐦 Posted: @{X_USERNAME} — {post['text'][:80]}…")
+                    if ok:
+                        recent_sent_ids.append(post["id"])
+                        last_seen_id = post["id"]
+
+                        await db.upsert_x_watch_state(
+                            X_USERNAME,
+                            "rss",
+                            last_seen_id,
+                            post.get("created_at", ""),
+                        )
+
+                        print(f"🐦 Posted: @{X_USERNAME} — {post['text'][:80]}…")
+                    else:
+                        print(f"   ⚠️ Failed to send post ID {post['id']}")
 
                     await asyncio.sleep(1.5)
-
-                valid_items = [i for i in items if not _should_skip(i)]
-                newest = _pick_newest(valid_items)
-                if newest:
-                    last_seen_id = newest["id"]
-                    await db.upsert_x_watch_state(
-                        X_USERNAME,
-                        "",
-                        last_seen_id,
-                        newest.get("created_at", ""),
-                    )
 
             except Exception as e:
                 print(f"❌ X watcher error: {e}")
