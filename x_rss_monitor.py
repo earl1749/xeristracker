@@ -44,7 +44,7 @@ RAID_CHANNEL_ID: int = 1481659347460161607          # ← change to your raid ch
 DEFAULT_X_ACCOUNT = "XerisCoin"
 
 # How often to poll each account (seconds)
-POLL_INTERVAL = 600
+POLL_INTERVAL = 90
 
 # Max total watched accounts (including the default)
 MAX_ACCOUNTS = 3
