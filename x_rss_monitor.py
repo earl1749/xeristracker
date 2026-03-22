@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -49,6 +48,11 @@ def _strip_at(username: str) -> str:
     return username.lstrip("@").strip().lower()
 
 
+def _feed_has_items(xml_text: str) -> bool:
+    """Quickly check if the RSS/Atom feed contains any item/entry."""
+    return bool(re.search(r"<(?:item|entry)\b", xml_text, re.IGNORECASE))
+
+
 async def _try_url(client: httpx.AsyncClient, url: str) -> Optional[str]:
     try:
         r = await client.get(url, headers={"User-Agent": "Mozilla/5.0 XerisBot/2.0"})
@@ -63,29 +67,33 @@ async def _fetch_rss(username: str) -> Optional[str]:
     async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
         # 1. Nitter instances
         for base in NITTER_INSTANCES:
-            result = await _try_url(client, f"{base}/{username}/rss")
-            if result and "<item>" in result:
-                print(f"   ✅ RSS via {base}")
-                return result
+            url = f"{base}/{username}/rss"
+            xml_text = await _try_url(client, url)
+            if xml_text and _feed_has_items(xml_text):
+                print(f"   ✅ RSS via {base} (with items)")
+                return xml_text
+            elif xml_text:
+                print(f"   ⚠️ {url} – feed has no items, trying next source")
 
         # 2. RSSHub — try multiple routes
-        # Personal accounts sometimes need different paths than channel/brand accounts
         if RSSHUB_INSTANCE:
             rsshub_routes = [
                 f"{RSSHUB_INSTANCE}/twitter/user/{username}",
                 f"{RSSHUB_INSTANCE}/twitter/user/{username}/tweets",
+                f"{RSSHUB_INSTANCE}/twitter/user/{username}/with_replies",   # includes replies
+                f"{RSSHUB_INSTANCE}/twitter/user/{username}/no_retweets",    # exclude retweets
                 f"{RSSHUB_INSTANCE}/x/user/{username}",
                 f"{RSSHUB_INSTANCE}/twitter/user/{username}/media",
             ]
             for url in rsshub_routes:
-                result = await _try_url(client, url)
-                if result and "<item>" in result:
-                    print(f"   ✅ RSS via {url}")
-                    return result
-                elif result:
-                    print(f"   ⚠️ {url.split('/')[-2]}/{url.split('/')[-1]} — empty feed")
+                xml_text = await _try_url(client, url)
+                if xml_text and _feed_has_items(xml_text):
+                    print(f"   ✅ RSS via {url} (with items)")
+                    return xml_text
+                elif xml_text:
+                    print(f"   ⚠️ {url} – feed has no items, trying next source")
 
-    print(f"   ⚠️ All RSS sources failed for @{username} — will retry next cycle")
+    print(f"   ⚠️ All RSS sources failed for @{username} – will retry next cycle")
     return None
 
 
@@ -175,6 +183,12 @@ def _parse_rss_posts(xml_text: str, username: str = "") -> List[Dict]:
             # Extract image
             media_content = item.find("media:content", ns)
             image_url = media_content.get("url") if media_content is not None else None
+
+            # Try enclosure if no media:content found
+            if not image_url:
+                enclosure = item.find("enclosure")
+                if enclosure is not None:
+                    image_url = enclosure.get("url")
 
             # Need at least a guid or link to track uniqueness
             if not guid and not link:
