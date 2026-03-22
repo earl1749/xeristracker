@@ -64,20 +64,24 @@ class LimitOrder:
     timestamp:      float
     is_active:      bool = True
 
-
 @dataclass
 class MarketState:
-    current_price:        float = 0.0
-    current_market_cap:   float = 0.0
-    total_supply:         float = 1_000_000_000.0
-    last_price_update:    float = 0.0
-    price_reference:      float = 0.0
-    last_alert_up_time:   float = 0.0
-    last_alert_down_time: float = 0.0
-    last_alert_direction: Optional[str] = None
-    sol_price_usd:        float = 150.0
+    current_price: float = 0.0
+    current_market_cap: float = 0.0
+    total_supply: float = 0.0
 
-    # AMM / pool state
-    pool_token_reserve:  float = 0.0
-    pool_sol_reserve:    float = 0.0
-    pool_liquidity_usd:  float = 0.0
+    sol_price_usd: float = 0.0
+
+    pool_token_reserve: float = 0.0
+    pool_quote_reserve: float = 0.0
+    pool_liquidity_usd: float = 0.0
+
+    quote_mint: str = ""
+    quote_symbol: str = ""
+    quote_to_usd: float = 0.0
+
+    price_reference: float = 0.0
+    last_price_update: float = 0.0
+    last_alert_up_time: float = 0.0
+    last_alert_down_time: float = 0.0
+    last_alert_direction: str = ""
