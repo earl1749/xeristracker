@@ -1,19 +1,3 @@
-"""
-x_rss_monitor.py
-────────────────
-Monitors X (Twitter) accounts for new posts and relays them to Discord.
-
-Channel routing:
-  • Default account (XerisCoin) → X_ANNOUNCE_CHANNEL_ID  (your X announcements channel)
-  • Raided accounts             → RAID_CHANNEL_ID         (your raid / alpha channel)
-  • Or specify a channel per account: !raid @username #channel-id
-
-Commands:
-  !raid @username [channel_id]  — add account (max 3), optional target channel
-  !unraid @username             — remove a watched account (default cannot be removed)
-  !raidlist                     — show all watched accounts + their target channels
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -33,10 +17,10 @@ from helpers.formatters import get_timestamp
 # ── Channel config ─────────────────────────────────────────────────────────────
 
 # Where XerisCoin's own posts go (your X announcements channel)
-X_ANNOUNCE_CHANNEL_ID: int = 1483822900795670678  # ← change to your announcements channel ID
+X_ANNOUNCE_CHANNEL_ID: int = ALERT_CHANNEL_ID   # ← change to your announcements channel ID
 
 # Where raided/watched accounts' posts go (separate raid/alpha channel)
-RAID_CHANNEL_ID: int = 1481659347460161607          # ← change to your raid channel ID
+RAID_CHANNEL_ID: int = ALERT_CHANNEL_ID          # ← change to your raid channel ID
 
 # ── Account config ─────────────────────────────────────────────────────────────
 
@@ -65,7 +49,7 @@ NITTER_INSTANCES = [
 ]
 
 # Your self-hosted RSSHub instance — set "" to skip
-RSSHUB_INSTANCE = "https://rsshub-production-69fe.up.railway.app"
+RSSHUB_INSTANCE = "https://rsshub.app"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # RSS fetching
@@ -105,40 +89,89 @@ async def _fetch_rss(username: str) -> Optional[str]:
 # RSS parsing
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _parse_timestamp(pub_str: str) -> int:
+    """Try multiple date formats used by nitter/RSSHub."""
+    formats = [
+        "%a, %d %b %Y %H:%M:%S %z",   # nitter:  Mon, 01 Jan 2024 12:00:00 +0000
+        "%a, %d %b %Y %H:%M:%S GMT",  # some instances use GMT literally
+        "%Y-%m-%dT%H:%M:%S%z",        # RSSHub Atom
+        "%Y-%m-%dT%H:%M:%SZ",         # ISO 8601 UTC
+    ]
+    for fmt in formats:
+        try:
+            return int(datetime.strptime(pub_str.strip(), fmt).timestamp())
+        except Exception:
+            continue
+    return 0
+
+
+def _clean_content(raw: str) -> str:
+    """Strip HTML tags and clean up whitespace from RSS content."""
+    # Remove HTML tags
+    text = re.sub(r"<[^>]+>", "", raw)
+    # Decode common HTML entities
+    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    text = text.replace("&quot;", '"').replace("&#39;", "'").replace("&nbsp;", " ")
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _parse_rss_posts(xml_text: str) -> List[Dict]:
     posts = []
     try:
         root  = ET.fromstring(xml_text)
-        ns    = {"media": "http://search.yahoo.com/mrss/"}
+        ns    = {"media": "http://search.yahoo.com/mrss/",
+                 "content": "http://purl.org/rss/1.0/modules/content/"}
         items = root.findall(".//item")
         for item in items:
-            guid      = (item.findtext("guid")    or "").strip()
-            title     = (item.findtext("title")   or "").strip()
-            link      = (item.findtext("link")    or "").strip()
-            pub_str   = (item.findtext("pubDate") or "").strip()
+            guid    = (item.findtext("guid")    or "").strip()
+            title   = (item.findtext("title")   or "").strip()
+            link    = (item.findtext("link")    or "").strip()
+            pub_str = (item.findtext("pubDate") or "").strip()
+
+            # Get full post content — prefer content:encoded, fallback to description, then title
+            content_encoded = item.findtext("content:encoded", namespaces=ns) or ""
+            description     = item.findtext("description") or ""
+            raw_content     = content_encoded or description or title
+            content         = _clean_content(raw_content)
+
+            # If content is empty or just a URL, fall back to title
+            if not content or content.startswith("http"):
+                content = _clean_content(title)
+
+            # Trim to 500 chars
+            if len(content) > 500:
+                content = content[:497] + "…"
+
+            # Extract image
             media_content = item.find("media:content", ns)
             image_url = media_content.get("url") if media_content is not None else None
+
             if not guid:
                 continue
-            ts = 0
-            try:
-                dt = datetime.strptime(pub_str, "%a, %d %b %Y %H:%M:%S %z")
-                ts = int(dt.timestamp())
-            except Exception:
-                pass
+
+            ts = _parse_timestamp(pub_str)
+
+            # Extract numeric post ID from guid or link (most reliable unique key)
             post_id = ""
-            m = re.search(r"/status/(\d+)", guid + link)
+            m = re.search(r"/status/(\d+)", guid + " " + link)
             if m:
                 post_id = m.group(1)
+            else:
+                # fallback: use full guid
+                post_id = guid
+
             posts.append({
-                "post_id":   post_id or guid,
-                "title":     title,
+                "post_id":   post_id,
+                "content":   content,
                 "link":      link,
                 "timestamp": ts,
                 "image_url": image_url,
             })
     except Exception as e:
         print(f"   ⚠️ RSS parse error: {e}")
+
     posts.sort(key=lambda p: p["timestamp"])
     return posts
 
@@ -148,32 +181,22 @@ def _parse_rss_posts(xml_text: str) -> List[Dict]:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _build_post_embed(username: str, post: Dict, is_default: bool = False) -> dict:
-    title  = post["title"]
-    link   = post["link"]
-    ts     = post["timestamp"]
-    dt_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if ts else "Unknown"
-    if len(title) > 280:
-        title = title[:277] + "…"
+    content = post["content"]
+    link    = post["link"]
+    ts      = post["timestamp"]
+    dt_str  = (datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+               if ts else "Unknown")
 
-    # Default account gets a slightly different look
-    color  = 0x1D9BF0 if not is_default else 0x10B981
+    color  = 0x10B981 if is_default else 0x1D9BF0
     prefix = "📢" if is_default else "🎯"
 
-    embed = {
+    return {
         "author":      {"name": f"{prefix} @{username} posted on X", "url": f"https://x.com/{username}"},
-        "description": title,
-        "url":         link,
+        "description": f"{content}\n\n🔗 {link}",
         "color":       color,
-        "fields": [
-            {"name": "🔗 View Post", "value": f"[Open on X]({link})", "inline": True},
-            {"name": "🕐 Posted",    "value": f"`{dt_str}`",          "inline": True},
-        ],
-        "footer":    {"text": f"X Monitor · @{username}"},
-        "timestamp": get_timestamp(),
+        "footer":      {"text": f"X Monitor · @{username} · {dt_str}"},
+        "timestamp":   get_timestamp(),
     }
-    if post.get("image_url"):
-        embed["image"] = {"url": post["image_url"]}
-    return embed
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -210,16 +233,41 @@ async def _check_account(row: Dict, db: DatabaseManager) -> None:
 
     state        = await db.get_x_watch_state(username)
     last_post_id = (state or {}).get("last_post_id", "")
+    latest       = posts[-1]
 
+    # First run or no saved state — just save the latest post ID, send nothing
+    if not last_post_id:
+        print(f"   📌 First run for @{username} — saving latest post ID, no alert sent")
+        await db.upsert_x_watch_state(
+            username=username,
+            user_id="",
+            last_post_id=latest["post_id"],
+            last_post_time=str(latest["timestamp"]),
+        )
+        return
+
+    # Already up to date
+    if latest["post_id"] == last_post_id:
+        return
+
+    # Collect only posts newer than the last saved one
     new_posts = []
-    if last_post_id:
-        for p in posts:
-            if p["post_id"] == last_post_id:
-                break
-            new_posts.append(p)
-    # First run: just save state, don't spam
+    for p in posts:
+        if p["post_id"] == last_post_id:
+            break
+        new_posts.append(p)
 
-    latest = posts[-1]
+    if not new_posts:
+        # IDs don't match but nothing found — update to latest to avoid re-checking
+        await db.upsert_x_watch_state(
+            username=username,
+            user_id="",
+            last_post_id=latest["post_id"],
+            last_post_time=str(latest["timestamp"]),
+        )
+        return
+
+    # Save state first before sending (prevents re-alerting on crash)
     await db.upsert_x_watch_state(
         username=username,
         user_id="",
@@ -227,22 +275,20 @@ async def _check_account(row: Dict, db: DatabaseManager) -> None:
         last_post_time=str(latest["timestamp"]),
     )
 
-    if not new_posts:
-        return
-
     print(f"   📢 {len(new_posts)} new post(s) from @{username} → ch:{channel_id}")
 
-    for post in new_posts[-5:]:
+    # Send newest last, cap at 3 to avoid spam
+    for post in new_posts[-3:]:
         embed = _build_post_embed(username, post, is_default=is_default)
         if post.get("image_url"):
             await send_message_with_image(
                 channel_id,
-                content=f"{'📢' if is_default else '🎯'} New post from **@{username}**",
+                content=f"{'📢' if is_default else '🎯'} **@{username}** • {post['content'][:200]}",
                 image_url=post["image_url"],
             )
         else:
             await send_message(channel_id, embeds=[embed])
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.5)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
